@@ -12,9 +12,9 @@ COPY spec spec
 # rebuild recompiles the full dependency tree in release mode.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/s/target \
-    cargo build --release --locked -p breadstudy-server && \
+    cargo build --release --locked -p breadstudy-server --bin breadstudy-server --bin seed && \
     cp /s/target/release/breadstudy-server /s/breadstudy-server && \
-    cp /s/target/release/breadstudy-seed /s/breadstudy-seed
+    cp /s/target/release/seed /s/breadstudy-seed
 
 FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
