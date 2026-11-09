@@ -8,6 +8,7 @@ pub mod verify;
 pub mod voice;
 pub mod speech;
 pub mod static_web;
+pub mod teach;
 pub mod stt;
 pub mod fsrs;
 

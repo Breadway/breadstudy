@@ -111,6 +111,100 @@ async function startSession() {
   }
 }
 
+let teachHistory = [];
+
+function sanitizeSvgClient(svg) {
+  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const root = doc && doc.documentElement;
+  if (!root || root.nodeName.toLowerCase() !== "svg") return null;
+  const allowed = new Set(["svg","g","path","line","rect","circle","ellipse","polygon","polyline","text","tspan","defs","marker"]);
+  const walk = (node) => {
+    [...node.children].forEach((child) => {
+      if (!allowed.has(child.nodeName.toLowerCase())) { child.remove(); return; }
+      [...child.attributes].forEach((attr) => {
+        const name = attr.name.toLowerCase();
+        if (name.startsWith("on") || name === "href" || name === "xlink:href" || name === "style") {
+          child.removeAttribute(attr.name);
+        }
+      });
+      walk(child);
+    });
+  };
+  walk(root);
+  return root.outerHTML;
+}
+
+function addBlock(block) {
+  const board = document.getElementById("teach-board");
+  if (!board) return;
+  if (block.kind === "text") {
+    const p = document.createElement("p");
+    p.textContent = block.text;
+    board.appendChild(p);
+  } else if (block.kind === "latex") {
+    const div = document.createElement("div");
+    div.className = "board-latex";
+    if (window.katex) {
+      try { katex.render(block.latex, div, { displayMode: true, throwOnError: false }); }
+      catch (e) { div.textContent = block.latex; }
+    } else {
+      div.textContent = block.latex;
+    }
+    board.appendChild(div);
+  } else if (block.kind === "steps") {
+    const ol = document.createElement("ol");
+    (block.items || []).forEach((text) => {
+      const li = document.createElement("li");
+      li.textContent = text;
+      ol.appendChild(li);
+    });
+    board.appendChild(ol);
+  } else if (block.kind === "svg") {
+    const clean = sanitizeSvgClient(block.svg || "");
+    if (clean) {
+      const wrap = document.createElement("div");
+      wrap.className = "board-svg";
+      wrap.innerHTML = clean;
+      board.appendChild(wrap);
+    }
+  }
+}
+
+async function teach() {
+  const input = document.getElementById("teach-input");
+  const status = document.getElementById("teach-status");
+  const btn = document.getElementById("teach-btn");
+  const board = document.getElementById("teach-board");
+  const question = ((input && input.value) || "").trim();
+  if (!question) {
+    if (status) status.textContent = "Type a question first.";
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Thinking...";
+  try {
+    const reply = await postJson("/api/teach", {
+      question,
+      item_id: sessionState.item ? sessionState.item.id : null,
+      history: teachHistory
+    });
+    if (board) board.innerHTML = "";
+    reply.blocks.forEach((block, index) => setTimeout(() => addBlock(block), index * 140));
+    teachHistory.push({ role: "user", content: question });
+    teachHistory.push({
+      role: "assistant",
+      content: reply.blocks.map((b) => b.text || b.latex || (b.items || []).join("; ")).join("\n")
+    });
+    teachHistory = teachHistory.slice(-8);
+    if (input) input.value = "";
+    if (status) status.textContent = "";
+  } catch (e) {
+    if (status) status.textContent = "Tutor unavailable: " + e.message + ". The last board is still shown.";
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function currentPhase() {
   return PHASES[sessionState.phaseIndex] || "end";
 }
@@ -287,6 +381,17 @@ function bindSessionControls() {
   if (next) next.addEventListener("click", advancePhase);
   const hintBtn = document.getElementById("hint-btn");
   if (hintBtn) hintBtn.addEventListener("click", useHint);
+  const teachBtn = document.getElementById("teach-btn");
+  if (teachBtn) teachBtn.addEventListener("click", teach);
+  const teachInput = document.getElementById("teach-input");
+  if (teachInput) {
+    teachInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        teach();
+      }
+    });
+  }
   const skip = document.getElementById("skip-btn");
   if (skip) skip.addEventListener("click", () => {
     const reason = prompt("One-line skip reason (required):", "");
@@ -295,15 +400,6 @@ function bindSessionControls() {
       advancePhase();
     }
   });
-}
-
-function renderSamplePrompt() {
-  const prompt = document.getElementById("item-prompt");
-  if (prompt) prompt.textContent = SAMPLE_ITEM.prompt;
-  if (window.BreadstudyScratch) {
-    window.BreadstudyScratch.previewInto("scratch-preview", SAMPLE_ITEM.latex);
-    window.BreadstudyScratch.drawCylinder("scratch-diagram");
-  }
 }
 
 function renderDashboard() {
@@ -333,10 +429,6 @@ document.addEventListener("DOMContentLoaded", () => {
   renderTimer();
   renderHints();
   renderItem();
-  if (window.BreadstudyScratch) {
-    window.BreadstudyScratch.previewInto("scratch-preview", SAMPLE_ITEM.latex);
-    window.BreadstudyScratch.drawCylinder("scratch-diagram");
-  }
   bindSessionControls();
   bindAnswerInputs();
   renderDashboard();

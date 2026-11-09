@@ -39,12 +39,14 @@
 <button id="hint-btn" type="button">Reveal next hint</button>
 </section>
 <section class="card" aria-labelledby="scratch-h">
-<h2 id="scratch-h">Scratchpad</h2>
+<h2 id="scratch-h">Teaching board</h2>
 <div class="scratchpad">
-<label for="scratch-input">Working (LaTeX supported)</label>
-<textarea id="scratch-input" rows="3">V = \pi r^2 h = \pi \times 3^2 \times 7</textarea>
-<div id="scratch-preview" aria-live="polite"></div>
-<div id="scratch-diagram" aria-label="Shape diagram"></div>
+<p class="muted">Ask the tutor to explain or draw something. It writes here, step by step.</p>
+<div id="teach-board" aria-live="polite"></div>
+<p id="teach-status" class="muted" role="status"></p>
+<label for="teach-input">Ask a question</label>
+<textarea id="teach-input" rows="2" placeholder="e.g. show me why the cylinder volume formula works"></textarea>
+<button id="teach-btn" class="primary" type="button">Explain on the board</button>
 </div>
 </section>
 <section class="card" aria-labelledby="answer-h">
@@ -67,7 +69,6 @@
 </main>
 <footer>Soft friction only. Nothing is blocked. Escape is always available via Skip.</footer>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script defer src="./scratchpad.js"></script>
 <script defer src="./app.js"></script>
 </body>
 </html>
