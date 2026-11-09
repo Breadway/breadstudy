@@ -13,8 +13,10 @@ FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /s/target/release/breadstudy-server /usr/local/bin/breadstudy-server
+COPY web /srv/breadstudy-web
 ENV BREADSTUDY_LISTEN=0.0.0.0:7290 \
-    BREADSTUDY_DATABASE_PATH=/var/lib/breadstudy/breadstudy.db
+    BREADSTUDY_DATABASE_PATH=/var/lib/breadstudy/breadstudy.db \
+    BREADSTUDY_WEB_DIR=/srv/breadstudy-web
 VOLUME /var/lib/breadstudy
 EXPOSE 7290
 ENTRYPOINT ["breadstudy-server"]

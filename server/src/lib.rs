@@ -7,6 +7,7 @@ pub mod seed;
 pub mod verify;
 pub mod voice;
 pub mod speech;
+pub mod static_web;
 pub mod stt;
 pub mod fsrs;
 
