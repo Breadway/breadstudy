@@ -3,6 +3,7 @@ pub mod db;
 pub mod error;
 pub mod grading;
 pub mod indexer;
+pub mod seed;
 pub mod verify;
 pub mod voice;
 pub mod speech;
