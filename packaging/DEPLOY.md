@@ -85,6 +85,23 @@ long-running embedding services (llama-server MiniLM on 7310, embed-shim on
 rows are registered in PORTS.md; an INFRA issue tracks them. Do not enable
 the unit on any port until the registry confirms the assignment.
 
+## Seed the item bank
+
+The image has no vault. Seed from the host checkout into the live volume with a
+one-off container:
+
+```sh
+docker run --rm --name studyseed-runner \
+  --entrypoint breadstudy-seed \
+  -v breadstudy_breadstudy-data:/var/lib/breadstudy \
+  -v /home/breadway/Projects/school-notes-year-10:/vault:ro \
+  breadstudy:local \
+  --db /var/lib/breadstudy/breadstudy.db --vault /vault/Maths
+```
+
+It prints a JSON report per Practice set. Re-running is idempotent; answers
+that fail the SymPy gate stay `review_required` instead of being silently fixed.
+
 ## Edge
 
 Hestia Caddy (LAN) and Aegis (public) reverse-proxy `study.breadway.dev` to host port 7220; blocks live in the infra repo. Set `BREADSTUDY_BIND=0.0.0.0:7220` in `.env` so the Tailscale path can reach it. BIPS id `breadstudy-web-prod`.
