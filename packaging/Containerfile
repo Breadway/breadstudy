@@ -1,0 +1,20 @@
+# breadstudy-server, single image.
+# Build:  docker build -t breadstudy:local -f packaging/Containerfile .
+
+FROM docker.io/library/rust:1-bookworm AS build
+WORKDIR /s
+COPY Cargo.toml Cargo.lock ./
+COPY server server
+COPY migrations migrations
+COPY spec spec
+RUN cargo build --release --locked -p breadstudy-server
+
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /s/target/release/breadstudy-server /usr/local/bin/breadstudy-server
+ENV BREADSTUDY_LISTEN=0.0.0.0:7290 \
+    BREADSTUDY_DATABASE_PATH=/var/lib/breadstudy/breadstudy.db
+VOLUME /var/lib/breadstudy
+EXPOSE 7290
+ENTRYPOINT ["breadstudy-server"]

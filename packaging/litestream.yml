@@ -1,0 +1,4 @@
+dbs:
+  - path: /var/lib/breadstudy/breadstudy.db
+    replicas:
+      - url: file:///var/backups/breadstudy/litestream
