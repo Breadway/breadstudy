@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#141210">
+<title>breadstudy session</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<link rel="stylesheet" href="./styles.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+</head>
+<body>
+<header class="topbar">
+<div class="brand">breadstudy session</div>
+<nav class="tabs" aria-label="Primary">
+<a href="./index.html">Dashboard</a>
+<a href="./session.html" aria-current="page">Session</a>
+</nav>
+</header>
+<main>
+<section class="card" aria-labelledby="phase-h">
+<h2 id="phase-h">Phase and timer</h2>
+<p id="phase-label" class="muted">Phase: prime</p>
+<div class="phase-row" id="phase-row" aria-label="Session phases"></div>
+<div class="timer-row">
+<div class="timer" id="session-timer" aria-live="polite">02:00</div>
+<button id="start-btn" class="primary" type="button">Start 20 min</button>
+<button id="next-phase-btn" type="button">Next phase</button>
+<button id="skip-btn" type="button">Skip with reason</button>
+</div>
+</section>
+<section class="card" aria-labelledby="item-h">
+<h2 id="item-h">Current item</h2>
+<p id="item-prompt">A cylinder has radius 3 cm and height 7 cm. Find its volume.</p>
+<div class="hint-list" id="hint-list" aria-label="Hint ladder"></div>
+<p id="hint-meta" class="muted">Hints used: 0 of 3</p>
+<button id="hint-btn" type="button">Reveal next hint</button>
+</section>
+<section class="card" aria-labelledby="scratch-h">
+<h2 id="scratch-h">Scratchpad</h2>
+<div class="scratchpad">
+<label for="scratch-input">Working (LaTeX supported)</label>
+<textarea id="scratch-input" rows="3">V = \pi r^2 h = \pi \times 3^2 \times 7</textarea>
+<div id="scratch-preview" aria-live="polite"></div>
+<div id="scratch-diagram" aria-label="Shape diagram"></div>
+</div>
+</section>
+<section class="card" aria-labelledby="answer-h">
+<h2 id="answer-h">Answer input</h2>
+<div class="answer-grid">
+<div>
+<label for="latex-answer">Typed LaTeX answer</label>
+<textarea id="latex-answer" rows="2" placeholder="e.g. 63\pi\ \text{cm}^3"></textarea>
+<p id="latex-preview" class="muted">Typed answer preview appears here.</p>
+</div>
+<div class="input-row">
+<label class="file-btn" id="photo-input-label" for="photo-input">Take photo of working</label>
+<input id="photo-input" type="file" accept="image/*" capture="environment">
+<button id="voice-btn" type="button">Speak explanation</button>
+</div>
+<p id="photo-status" class="muted"></p>
+<p id="voice-status" class="muted"></p>
+</div>
+</section>
+</main>
+<footer>Soft friction only. Nothing is blocked. Escape is always available via Skip.</footer>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="./scratchpad.js"></script>
+<script defer src="./app.js"></script>
+</body>
+</html>
