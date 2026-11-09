@@ -402,20 +402,64 @@ function bindSessionControls() {
   });
 }
 
-function renderDashboard() {
-  fetchSkills().then((skills) => {
-    const el = document.getElementById("dash-skills");
-    if (el) {
-      if (skills.length === 0) {
-        el.textContent = "No skills indexed yet. Run breadstudy-seed against the vault.";
-      } else {
-        const strands = [...new Set(skills.map((s) => s.strand))].sort();
-        el.textContent = skills.length + " skills indexed across " + strands.join(", ") + ".";
-      }
+async function renderDashboard() {
+  const skills = await fetchSkills();
+  const el = document.getElementById("dash-skills");
+  if (el) {
+    if (skills.length === 0) {
+      el.textContent = "No skills indexed yet. Run breadstudy-seed against the vault.";
+    } else {
+      const strands = [...new Set(skills.map((s) => s.strand))].sort();
+      el.textContent = skills.length + " skills indexed across " + strands.join(", ") + ".";
     }
-  });
+  }
+
   const today = document.getElementById("dash-today");
   if (today) today.textContent = "Today: 20 min school-day session. Start to pull a due skill from the planner.";
+
+  const weak = document.getElementById("dash-weak");
+  if (weak) {
+    try {
+      const due = await fetch("/api/plan/due", { headers: { accept: "application/json" } }).then((r) => r.json());
+      weak.innerHTML = "";
+      if (Array.isArray(due) && due.length > 0) {
+        due.slice(0, 5).forEach((skill) => {
+          const li = document.createElement("li");
+          const pct = Math.round((skill.mastery || 0) * 100);
+          li.textContent = skill.name + " (" + pct + "% mastery)";
+          weak.appendChild(li);
+        });
+      } else {
+        const li = document.createElement("li");
+        li.textContent = "Nothing due yet. Finish a session to start tracking mastery.";
+        weak.appendChild(li);
+      }
+    } catch (e) {
+      weak.innerHTML = "";
+      const li = document.createElement("li");
+      li.textContent = "Due list unavailable right now.";
+      weak.appendChild(li);
+    }
+  }
+
+  const history = document.getElementById("dash-history");
+  if (history) {
+    try {
+      const log = JSON.parse(localStorage.getItem("breadstudy-log") || "[]");
+      history.innerHTML = "";
+      if (log.length === 0) {
+        const li = document.createElement("li");
+        li.textContent = "No sessions recorded on this device yet.";
+        history.appendChild(li);
+      } else {
+        log.filter((entry) => entry.kind === "session-start").slice(-5).reverse().forEach((entry) => {
+          const li = document.createElement("li");
+          li.textContent = new Date(entry.at).toLocaleString() + " - " + (entry.payload.template || "session");
+          history.appendChild(li);
+        });
+      }
+    } catch (e) { /* local history is best effort */ }
+  }
 }
 
 function registerSW() {
