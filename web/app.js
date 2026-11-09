@@ -11,7 +11,9 @@ let sessionState = {
   remaining: TEMPLATE_20.recall,
   timerId: null,
   hintsUsed: 0,
-  item: null
+  item: null,
+  sessionId: null,
+  serverMode: false
 };
 
 const SAMPLE_ITEM = {
@@ -26,6 +28,16 @@ const SAMPLE_ITEM = {
   ]
 };
 
+async function postJson(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body || {})
+  });
+  if (!res.ok) throw new Error(path + " -> " + res.status);
+  return res.json();
+}
+
 async function fetchSkills() {
   try {
     const res = await fetch("/api/skills", { headers: { accept: "application/json" } });
@@ -35,6 +47,67 @@ async function fetchSkills() {
     return [];
   } catch (e) {
     return [];
+  }
+}
+
+const PHASE_INDEX = { prime: 0, recall: 1, practice: 2, explain: 3, reflect: 4, break: 5, end: 6 };
+
+function applyServerView(view) {
+  sessionState.sessionId = view.id;
+  sessionState.serverMode = true;
+  sessionState.phaseIndex = PHASE_INDEX[view.phase] !== undefined ? PHASE_INDEX[view.phase] : 0;
+  sessionState.remaining = view.phase_remaining_seconds || 0;
+  sessionState.hintsUsed = view.hints_used || 0;
+  if (view.item) {
+    sessionState.item = {
+      id: view.item.id,
+      skill_id: view.item.skill_id,
+      strand: view.item.strand,
+      prompt: view.item.prompt,
+      hints: view.item.hints || []
+    };
+  } else {
+    sessionState.item = null;
+  }
+  renderPhases("phase-row");
+  renderTimer();
+  renderHints();
+  renderItem();
+}
+
+function renderItem() {
+  const prompt = document.getElementById("item-prompt");
+  if (!prompt) return;
+  if (sessionState.item) {
+    prompt.textContent = sessionState.item.prompt;
+    const strand = document.getElementById("item-strand");
+    if (strand) strand.textContent = sessionState.item.strand || "";
+  } else {
+    prompt.textContent = sessionState.sessionId
+      ? "No items indexed for this skill yet. Run the seeder, or pick another skill."
+      : "Press Start to pull a due item from the planner.";
+  }
+}
+
+async function startSession() {
+  try {
+    const view = await postJson("/api/session", { template: "school_day_20" });
+    applyServerView(view);
+    startTimer();
+    logLocal("session-start", { template: "school_day_20", session: view.id });
+  } catch (e) {
+    sessionState.serverMode = false;
+    sessionState.sessionId = null;
+    sessionState.item = SAMPLE_ITEM;
+    sessionState.phaseIndex = 0;
+    sessionState.remaining = TEMPLATE_20.recall;
+    sessionState.hintsUsed = 0;
+    renderPhases("phase-row");
+    renderTimer();
+    renderHints();
+    renderItem();
+    startTimer();
+    logLocal("session-start", { template: "20min", offline: true });
   }
 }
 
@@ -84,7 +157,16 @@ function stopTimer() {
   sessionState.timerId = null;
 }
 
-function advancePhase() {
+async function advancePhase() {
+  if (sessionState.serverMode && sessionState.sessionId) {
+    try {
+      const view = await postJson("/api/session/" + sessionState.sessionId + "/advance", {});
+      applyServerView(view);
+      return;
+    } catch (e) {
+      logLocal("advance-failed", { error: String(e) });
+    }
+  }
   if (sessionState.phaseIndex < PHASES.length - 1) {
     sessionState.phaseIndex += 1;
     const phase = currentPhase();
@@ -101,7 +183,14 @@ function renderHints() {
   const root = document.getElementById("hint-list");
   if (!root) return;
   root.innerHTML = "";
-  const item = sessionState.item || SAMPLE_ITEM;
+  const item = sessionState.item || (sessionState.sessionId ? null : SAMPLE_ITEM);
+  if (!item) {
+    const meta = document.getElementById("hint-meta");
+    if (meta) meta.textContent = "Start a session to load the hint ladder.";
+    const btn = document.getElementById("hint-btn");
+    if (btn) btn.disabled = true;
+    return;
+  }
   item.hints.forEach((hint, idx) => {
     const div = document.createElement("div");
     const unlocked = idx < sessionState.hintsUsed;
@@ -115,7 +204,22 @@ function renderHints() {
   if (meta) meta.textContent = "Hints used: " + sessionState.hintsUsed + " of " + item.hints.length;
 }
 
-function useHint() {
+async function useHint() {
+  if (sessionState.serverMode && sessionState.sessionId) {
+    try {
+      const outcome = await postJson(
+        "/api/session/" + sessionState.sessionId + "/hint",
+        {}
+      );
+      sessionState.hintsUsed = outcome.hints_used;
+      if (outcome.session) sessionState.phaseIndex = PHASE_INDEX[outcome.session.phase];
+      renderHints();
+      logLocal("hint", { session: sessionState.sessionId, count: sessionState.hintsUsed, source: "server" });
+      return;
+    } catch (e) {
+      logLocal("hint-failed", { error: String(e) });
+    }
+  }
   const item = sessionState.item || SAMPLE_ITEM;
   if (sessionState.hintsUsed < item.hints.length) {
     sessionState.hintsUsed += 1;
@@ -178,18 +282,7 @@ function bindAnswerInputs() {
 
 function bindSessionControls() {
   const start = document.getElementById("start-btn");
-  if (start) start.addEventListener("click", () => {
-    sessionState.item = SAMPLE_ITEM;
-    sessionState.phaseIndex = 0;
-    sessionState.remaining = TEMPLATE_20.recall;
-    sessionState.hintsUsed = 0;
-    renderPhases("phase-row");
-    renderTimer();
-    renderHints();
-    renderSamplePrompt();
-    startTimer();
-    logLocal("session-start", { template: "20min" });
-  });
+  if (start) start.addEventListener("click", startSession);
   const next = document.getElementById("next-phase-btn");
   if (next) next.addEventListener("click", advancePhase);
   const hintBtn = document.getElementById("hint-btn");
@@ -213,14 +306,20 @@ function renderSamplePrompt() {
   }
 }
 
-async function renderDashboard() {
-  const skills = await fetchSkills();
-  const el = document.getElementById("dash-skills");
-  if (el) {
-    el.textContent = skills.length > 0 ? skills.length + " skills loaded from /api/skills." : "Using cached sample skills (API stub returns empty).";
-  }
+function renderDashboard() {
+  fetchSkills().then((skills) => {
+    const el = document.getElementById("dash-skills");
+    if (el) {
+      if (skills.length === 0) {
+        el.textContent = "No skills indexed yet. Run breadstudy-seed against the vault.";
+      } else {
+        const strands = [...new Set(skills.map((s) => s.strand))].sort();
+        el.textContent = skills.length + " skills indexed across " + strands.join(", ") + ".";
+      }
+    }
+  });
   const today = document.getElementById("dash-today");
-  if (today) today.textContent = "Today: 20 min school-day session, Test 6 Volume/SA focus.";
+  if (today) today.textContent = "Today: 20 min school-day session. Start to pull a due skill from the planner.";
 }
 
 function registerSW() {
@@ -233,7 +332,11 @@ document.addEventListener("DOMContentLoaded", () => {
   renderPhases("phase-row");
   renderTimer();
   renderHints();
-  renderSamplePrompt();
+  renderItem();
+  if (window.BreadstudyScratch) {
+    window.BreadstudyScratch.previewInto("scratch-preview", SAMPLE_ITEM.latex);
+    window.BreadstudyScratch.drawCylinder("scratch-diagram");
+  }
   bindSessionControls();
   bindAnswerInputs();
   renderDashboard();

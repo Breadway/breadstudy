@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # breadstudy-server, single image.
 # Build:  docker build -t breadstudy:local -f packaging/Containerfile .
 
@@ -7,12 +8,17 @@ COPY Cargo.toml Cargo.lock ./
 COPY server server
 COPY migrations migrations
 COPY spec spec
-RUN cargo build --release --locked -p breadstudy-server
+# Cache mounts keep dependency artifacts between builds. Without them every
+# rebuild recompiles the full dependency tree in release mode.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/s/target \
+    cargo build --release --locked -p breadstudy-server && \
+    cp /s/target/release/breadstudy-server /s/breadstudy-server
 
 FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /s/target/release/breadstudy-server /usr/local/bin/breadstudy-server
+COPY --from=build /s/breadstudy-server /usr/local/bin/breadstudy-server
 COPY web /srv/breadstudy-web
 ENV BREADSTUDY_LISTEN=0.0.0.0:7290 \
     BREADSTUDY_DATABASE_PATH=/var/lib/breadstudy/breadstudy.db \

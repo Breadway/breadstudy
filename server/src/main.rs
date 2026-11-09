@@ -25,7 +25,7 @@ fn build_router(pool: SqlitePool, web_dir: PathBuf) -> anyhow::Result<Router> {
     let web_root = web_dir.clone();
     Ok(Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/api/skills", get(api::list_skills))
+        .merge(api::skills_router(pool.clone()))
         .merge(api::session_router(pool.clone()))
         .merge(planner::router(pool.clone()))
         .merge(api::fsrs_routes().with_state(pool.clone()))

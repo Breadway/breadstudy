@@ -1,5 +1,40 @@
-pub async fn list_skills() -> &'static str {
-    "[]"
+/// One indexed skill, as exposed to the PWA dashboard.
+#[derive(serde::Serialize)]
+pub struct SkillSummary {
+    pub id: String,
+    pub strand: String,
+    pub name: String,
+    pub vault_note: String,
+}
+
+/// `GET /api/skills`: every skill the vault indexer imported.
+async fn list_skills(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<Vec<SkillSummary>>, (StatusCode, String)> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, strand, name, vault_note FROM skills ORDER BY strand, name",
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(internal_error_message)?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, strand, name, vault_note)| SkillSummary {
+                id,
+                strand,
+                name,
+                vault_note,
+            })
+            .collect(),
+    ))
+}
+
+/// Merge into the application router with the pool attached.
+pub fn skills_router(pool: SqlitePool) -> Router {
+    Router::new()
+        .route("/api/skills", get(list_skills))
+        .with_state(pool)
 }
 
 use std::sync::Arc;
