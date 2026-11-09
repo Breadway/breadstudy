@@ -4,5 +4,6 @@ pub mod error;
 pub mod indexer;
 pub mod verify;
 pub mod voice;
+pub mod speech;
 
 pub use error::{Error, Result};
