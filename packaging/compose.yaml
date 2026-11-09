@@ -3,7 +3,7 @@
 #   docker compose -f packaging/compose.yaml --project-directory . up -d --build
 #
 # Optional settings go in .env (NOT committed):
-#   BREADSTUDY_BIND=127.0.0.1:7290   host bind (Aegis reaches it over Tailscale, see DEPLOY.md)
+#   BREADSTUDY_BIND=127.0.0.1:7220   host bind (Aegis reaches it over Tailscale, see DEPLOY.md)
 
 services:
   breadstudy:
@@ -14,7 +14,7 @@ services:
     container_name: breadstudy
     restart: unless-stopped
     ports:
-      - "${BREADSTUDY_BIND:-127.0.0.1:7290}:7290"
+      - "${BREADSTUDY_BIND:-127.0.0.1:7220}:7290"
     environment:
       BREADSTUDY_LLM_BASE_URL: "${BREADSTUDY_LLM_BASE_URL:-https://opencode.ai/zen/go/v1}"
       BREADSTUDY_LLM_MODEL: "${BREADSTUDY_LLM_MODEL:-deepseek-v4.1-flash}"

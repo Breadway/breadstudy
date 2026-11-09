@@ -1,17 +1,51 @@
-use axum::{Router, routing::get};
+use std::sync::Arc;
+
+use axum::{routing::get, Router};
+use breadstudy_server::{api, db, grading::GradingService, planner};
+use sqlx::SqlitePool;
 use tracing_subscriber::EnvFilter;
+
+const DEFAULT_LISTEN: &str = "0.0.0.0:7290";
+const DEFAULT_DATABASE_PATH: &str = "/var/lib/breadstudy/breadstudy.db";
+
+/// Build the application router around a live SQLite pool.
+///
+/// Every module that shipped a router fragment is mounted here: the session
+/// engine (STUDY-16), the FSRS planner, hints and weekly review (STUDY-18),
+/// the skill planner (STUDY-5) and photo grading (STUDY-17). Grading reads its
+/// endpoint and key from the environment at startup, so a missing key fails
+/// here with the paths it tried instead of surfacing later as a request error.
+fn build_router(pool: SqlitePool) -> anyhow::Result<Router> {
+    let grading = api::GradingState {
+        pool: pool.clone(),
+        grading: Arc::new(GradingService::from_env()?),
+    };
+    Ok(Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/api/skills", get(api::list_skills))
+        .merge(api::session_router(pool.clone()))
+        .merge(planner::router(pool.clone()))
+        .merge(api::fsrs_routes().with_state(pool.clone()))
+        .merge(api::grading_router(grading)))
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/api/skills", get(breadstudy_server::api::list_skills));
-    let listen = std::env::var("BREADSTUDY_LISTEN").unwrap_or_else(|_| "0.0.0.0:7290".into());
+
+    let database_path = std::env::var("BREADSTUDY_DATABASE_PATH")
+        .unwrap_or_else(|_| DEFAULT_DATABASE_PATH.to_string());
+    let pool = db::connect(&database_path)
+        .await
+        .map_err(|error| anyhow::anyhow!("opening {database_path}: {error}"))?;
+    let app = build_router(pool)?;
+
+    let listen = std::env::var("BREADSTUDY_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
     let listener = tokio::net::TcpListener::bind(&listen).await?;
-    tracing::info!("breadstudy listening on {listen}");
+    let address = listener.local_addr()?;
+    tracing::info!(%database_path, "breadstudy listening on {address}");
     axum::serve(listener, app).await?;
     Ok(())
 }
