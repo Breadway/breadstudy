@@ -6,6 +6,7 @@ pub mod verify;
 pub mod voice;
 pub mod speech;
 pub mod stt;
+pub mod fsrs;
 
 pub use error::{Error, Result};
 pub mod session;
