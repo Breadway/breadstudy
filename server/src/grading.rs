@@ -390,7 +390,18 @@ pub enum GraderError {
 }
 
 const DEFAULT_LLM_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
-const DEFAULT_LLM_MODEL: &str = "deepseek-v4.1-flash";
+
+/// Stable per-process id used for OpenCode Go request routing.
+fn llm_session_id() -> &'static str {
+    use std::sync::OnceLock;
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        std::env::var("BREADSTUDY_LLM_SESSION")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    })
+}const DEFAULT_LLM_MODEL: &str = "deepseek-v4.1-flash";
 const DEFAULT_LLM_KEY_FILE: &str = "/etc/breadstudy/llm.key";
 const DEFAULT_FALLBACK_BASE_URL: &str = "http://127.0.0.1:7301/v1";
 const DEFAULT_FALLBACK_MODELS: &str = "Ornith-1.5-9B-Q4_K_M,LFM3-Omni-2B-Q4_K_M";
@@ -574,6 +585,9 @@ impl HttpGrader {
         if let Some(key) = &endpoint.api_key {
             builder = builder.bearer_auth(key);
         }
+        // OpenCode Go routes requests by session; without this header it
+        // rejects the call with MissingSessionID.
+        builder = builder.header("x-opencode-session", llm_session_id());
         let response = builder.send().await?;
         let status = response.status();
         let text = response.text().await?;

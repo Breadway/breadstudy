@@ -71,6 +71,7 @@ pub struct TeachClient {
     base_url: String,
     model: String,
     api_key: String,
+    session_id: String,
 }
 
 impl TeachClient {
@@ -80,10 +81,13 @@ impl TeachClient {
         let model =
             env_non_empty("BREADSTUDY_LLM_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let api_key = read_api_key()?;
+        let session_id = env_non_empty("BREADSTUDY_LLM_SESSION")
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Ok(Self {
             base_url,
             model,
             api_key,
+            session_id,
         })
     }
 
@@ -130,6 +134,7 @@ impl TeachClient {
         let response = reqwest::Client::new()
             .post(url)
             .bearer_auth(&self.api_key)
+            .header("x-opencode-session", &self.session_id)
             .json(&body)
             .send()
             .await?;
