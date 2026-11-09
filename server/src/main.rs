@@ -1,12 +1,14 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{routing::get, Router};
-use breadstudy_server::{api, db, grading::GradingService, planner};
+use breadstudy_server::{api, db, grading::GradingService, planner, static_web};
 use sqlx::SqlitePool;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:7290";
 const DEFAULT_DATABASE_PATH: &str = "/var/lib/breadstudy/breadstudy.db";
+const DEFAULT_WEB_DIR: &str = "/srv/breadstudy-web";
 
 /// Build the application router around a live SQLite pool.
 ///
@@ -15,18 +17,39 @@ const DEFAULT_DATABASE_PATH: &str = "/var/lib/breadstudy/breadstudy.db";
 /// the skill planner (STUDY-5) and photo grading (STUDY-17). Grading reads its
 /// endpoint and key from the environment at startup, so a missing key fails
 /// here with the paths it tried instead of surfacing later as a request error.
-fn build_router(pool: SqlitePool) -> anyhow::Result<Router> {
+fn build_router(pool: SqlitePool, web_dir: PathBuf) -> anyhow::Result<Router> {
     let grading = api::GradingState {
         pool: pool.clone(),
         grading: Arc::new(GradingService::from_env()?),
     };
+    let web_root = web_dir.clone();
     Ok(Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/skills", get(api::list_skills))
         .merge(api::session_router(pool.clone()))
         .merge(planner::router(pool.clone()))
         .merge(api::fsrs_routes().with_state(pool.clone()))
-        .merge(api::grading_router(grading)))
+        .merge(api::grading_router(grading))
+        .route(
+            "/",
+            get({
+                let root = web_root.clone();
+                move || {
+                    let root = root.clone();
+                    async move { static_web::serve(root, None).await }
+                }
+            }),
+        )
+        .route(
+            "/{*path}",
+            get({
+                let root = web_root;
+                move |path| {
+                    let root = root.clone();
+                    async move { static_web::serve(root, Some(path)).await }
+                }
+            }),
+        ))
 }
 
 #[tokio::main]
@@ -40,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&database_path)
         .await
         .map_err(|error| anyhow::anyhow!("opening {database_path}: {error}"))?;
-    let app = build_router(pool)?;
+    let web_dir = std::env::var("BREADSTUDY_WEB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_WEB_DIR));
+    let app = build_router(pool, web_dir)?;
 
     let listen = std::env::var("BREADSTUDY_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
     let listener = tokio::net::TcpListener::bind(&listen).await?;

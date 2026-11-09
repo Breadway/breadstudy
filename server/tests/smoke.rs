@@ -43,6 +43,10 @@ async fn start_server() -> TestServer {
         // Grading validates a key at startup; any non-empty value satisfies it
         // without a network call.
         .env("BREADSTUDY_LLM_API_KEY", "smoke-test-key")
+        .env(
+            "BREADSTUDY_WEB_DIR",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../web"),
+        )
         .env("RUST_LOG", "warn")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -99,5 +103,17 @@ async fn boots_and_serves_healthz_and_planner() {
         body.as_array().map(Vec::len),
         Some(0),
         "a fresh database has no due skills"
+    );
+
+    let index = client
+        .get(format!("{}/", server.base))
+        .send()
+        .await
+        .expect("GET /");
+    assert_eq!(index.status(), reqwest::StatusCode::OK);
+    let html = index.text().await.expect("index body");
+    assert!(
+        html.contains("<html"),
+        "the PWA shell should be served at /, got: {html:.80}"
     );
 }
