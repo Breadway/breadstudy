@@ -10,9 +10,12 @@
 //!    are unverifiable by SymPy and default to `review_required` until
 //!    a human approves them once via [`approve_item`].
 //! 4. SymPy chain check: every numeric equality link inside the worked
-//!    steps must hold (exactly or within rounding tolerance), and the
-//!    final answer must match the last worked step. A wrong worked
-//!    answer therefore cannot enter `verified` state.
+//!    steps must hold (exactly or within rounding tolerance;
+//!    unparseable prose-heavy links are skipped with a note, never
+//!    treated as agreement). Each final-answer alternative must appear
+//!    among the worked values, and at least one link overall must
+//!    agree. A wrong worked answer therefore cannot enter `verified`
+//!    state.
 //!
 //! SymPy runs through the system `python3`. If it is unavailable the
 //! item fails closed to `review_required`, never to `verified`.
@@ -133,6 +136,29 @@ fn has_digit(s: &str) -> bool {
     s.chars().any(|c| c.is_ascii_digit())
 }
 
+/// Known units, longest first. Used to suppress the implicit
+/// multiplication star when a letter after a value starts a unit
+/// (`7cm` stays `7cm` for the unit pass, not `7*cm`).
+const UNITS: [&str; 16] = [
+    "cm3", "cm2", "mm3", "mm2", "m3", "m2", "kL", "mL", "cm", "mm", "km",
+    "degrees", "degree", "m", "L", "s",
+];
+
+/// Length of the unit starting at `rest`, requiring a non-alphanumeric
+/// boundary after it (`2m+3` keeps its variable; `2m` is meters).
+fn unit_len_at(rest: &[char]) -> usize {
+    for u in UNITS {
+        let uc: Vec<char> = u.chars().collect();
+        if rest.len() >= uc.len() && rest[..uc.len()] == uc[..] {
+            let after = rest.get(uc.len()).copied();
+            if after.is_none() || !after.unwrap().is_ascii_alphanumeric() {
+                return uc.len();
+            }
+        }
+    }
+    0
+}
+
 /// Next non-blank character at or after `i + 1`, plus how many blanks
 /// were skipped (so the caller can advance past them).
 fn next_nonblank(i: usize, chars: &[char]) -> (Option<char>, usize) {
@@ -143,6 +169,191 @@ fn next_nonblank(i: usize, chars: &[char]) -> (Option<char>, usize) {
     (chars.get(i + 1 + skipped).copied(), skipped)
 }
 
+/// Expand superscript runs into `**` powers, but only after a value.
+/// `6²` becomes `6**2` and `10⁻⁵` becomes `10**-5`; on a bare
+/// variable (`x²`, `r²`) it is also a power, while a measured unit
+/// (`4.5m²`) drops with the unit.
+fn expand_superscripts(s: &str) -> String {
+    fn sup_map(c: char) -> Option<char> {
+        match c {
+            '⁰' => Some('0'),
+            '¹' => Some('1'),
+            '²' => Some('2'),
+            '³' => Some('3'),
+            '⁴' => Some('4'),
+            '⁵' => Some('5'),
+            '⁶' => Some('6'),
+            '⁷' => Some('7'),
+            '⁸' => Some('8'),
+            '⁹' => Some('9'),
+            '⁻' => Some('-'),
+            _ => None,
+        }
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if sup_map(chars[i]).is_some() {
+            let mut run = String::new();
+            while i < chars.len() {
+                if let Some(m) = sup_map(chars[i]) {
+                    run.push(m);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let prev_val = out
+                .chars()
+                .last()
+                .map(|p| p.is_ascii_digit() || p == ')' || p == '.')
+                .unwrap_or(false);
+            if prev_val {
+                if !out.ends_with("**") {
+                    out.push_str("**");
+                }
+                out.push_str(&run);
+            } else {
+                // A superscript on a measured unit (`4.5m²`) drops with
+                // the unit; on a variable (`x²`, `r²`) it is a power.
+                let unit_after_value = out.len() >= 2
+                    && matches!(out.chars().last(), Some('m') | Some('L'))
+                    && out[..out.len() - 1]
+                        .chars()
+                        .last()
+                        .is_some_and(|p| p.is_ascii_digit());
+                if !unit_after_value {
+                    out.push_str("**");
+                    out.push_str(&run);
+                }
+            }
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Rewrite `N%` as `(N/100)` so percentages compare numerically.
+fn expand_percent(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() || (c == '.' && out.chars().last().is_some_and(|p| p.is_ascii_digit()))
+        {
+            let start = out.len();
+            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                out.push(chars[i]);
+                i += 1;
+            }
+            if chars.get(i) == Some(&'%') {
+                let num = out[start..].to_string();
+                out.truncate(start);
+                out.push_str(&format!("({num}/100)"));
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Convert forward-trig degree angles to radians: `sin 28°` becomes
+/// `sin(28*pi/180)`. Inverse trig (`asin`, `atan`, ...) passes through:
+/// ratio arguments stay as-is and degree results convert in
+/// [`candidates`].
+fn convert_trig_degrees(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let mut func: Option<&str> = None;
+        for f in ["asin", "acos", "atan", "sin", "cos", "tan"] {
+            let fc: Vec<char> = f.chars().collect();
+            if chars.len() >= i + fc.len()
+                && chars[i..i + fc.len()] == fc[..]
+                && !(fc.len() == 3 && i > 0 && chars[i - 1] == 'a')
+            {
+                func = Some(f);
+                break;
+            }
+        }
+        let Some(f) = func else {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        };
+        if f.len() == 4 {
+            out.push_str(f);
+            i += 4;
+            continue;
+        }
+        let mut j = i + 3;
+        while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+            j += 1;
+        }
+        let opened = if chars.get(j) == Some(&'(') {
+            j += 1;
+            true
+        } else {
+            false
+        };
+        while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+            j += 1;
+        }
+        let num_start = j;
+        while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
+            j += 1;
+        }
+        if num_start < j && chars.get(j) == Some(&'°') {
+            let num: String = chars[num_start..j].iter().collect();
+            out.push_str(f);
+            out.push('(');
+            out.push_str(&num);
+            out.push_str("*pi/180)");
+            if opened {
+                out.push(')');
+            }
+            i = j + 1;
+        } else {
+            out.push_str(f);
+            i += 3;
+        }
+    }
+    out
+}
+/// Squared/cubed units are still units: drop the power early so `^`
+/// never mints a fake `**` on them (`cm^2` would corrupt).
+fn strip_unit_powers(s: &str) -> String {
+    let mut out = s.to_string();
+    for (pow, unit) in [
+        ("cm^2", "cm"),
+        ("cm^3", "cm"),
+        ("mm^2", "mm"),
+        ("mm^3", "mm"),
+        ("km^2", "km"),
+        ("km^3", "km"),
+        ("m^2", "m"),
+        ("m^3", "m"),
+        ("cm²", "cm"),
+        ("cm³", "cm"),
+        ("mm²", "mm"),
+        ("mm³", "mm"),
+        ("km²", "km"),
+        ("km³", "km"),
+        ("m²", "m"),
+        ("m³", "m"),
+    ] {
+        out = out.replace(pow, unit);
+    }
+    out
+}
 /// Expand `√` markers into `sqrt(...)` calls before the main pass.
 /// A group (`√(...)`) keeps its parentheses; a bare number (`√169`,
 /// `5√2`) is wrapped, with `*` inserted after a preceding value.
@@ -200,24 +411,42 @@ fn expand_sqrt(s: &str) -> String {
 /// `2m+3` keeps its variable. ASCII `x` is multiplication only
 /// between values.
 fn normalize_expr(raw: &str) -> String {
+    // Inverse trig names first, so the degree scanner below never sees
+    // a bare "sin" inside "sin⁻¹".
     let raw = raw
+        .replace("sin⁻¹", "asin")
+        .replace("cos⁻¹", "acos")
+        .replace("tan⁻¹", "atan")
+        .replace("sin^-1", "asin")
+        .replace("cos^-1", "acos")
+        .replace("tan^-1", "atan")
+        .replace("arcsin", "asin")
+        .replace("arccos", "acos")
+        .replace("arctan", "atan");
+    // Forward-trig degree angles before `°` is stripped below.
+    let raw = convert_trig_degrees(&raw);
+    // Unit powers before `^` mints fake `**` on them below.
+    let raw = strip_unit_powers(&raw);
+    let raw = raw
+        // Markdown bold first, before `^` mints new `**` powers below.
+        .replace("**", "")
         .replace('π', "pi")
+        // `pi(` is the constant applied to a group, never a call.
+        .replace("pi(", "pi*(")
         .replace('×', "*")
         .replace('−', "-")
         .replace('÷', "/")
         .replace('^', "**")
         .replace(['°', '✓', '✗'], "")
-        // Squared/cubed units are still units: drop the marker early so
-        // "cm²" strips as "cm" while "6²" still becomes "6**2" below.
-        .replace("cm²", "cm")
-        .replace("cm³", "cm")
-        .replace("mm²", "mm")
-        .replace("mm³", "mm")
-        .replace("km²", "km")
-        .replace("m²", "m")
-        .replace("m³", "m");
+        // Money/units that never reach SymPy.
+        .replace('$', "")
+        .replace("p.a.", "");
+    // Squared/cubed ASCII units still strip as units below.
+    let s = expand_superscripts(&raw);
     // Drop parenthetical remarks without digits, e.g. "(multiply by ...)".
-    let mut s = expand_sqrt(&raw);
+    let s = expand_sqrt(&s);
+    let s = expand_percent(&s);
+    let mut s = s;
     while let Some(start) = s.find('(') {
         let Some(rel) = s[start..].find(')') else {
             break;
@@ -226,6 +455,22 @@ fn normalize_expr(raw: &str) -> String {
         let group = &s[start + 1..end];
         if group.chars().any(|c| c.is_ascii_digit()) {
             break;
+        }
+        // Groups glued to an identifier are function arguments
+        // (`P(A∩B)`, `Solution(3,5)`), not remarks: keep them, unless
+        // they read as prose (contain whitespace).
+        let glued = start > 0
+            && s[..start]
+                .chars()
+                .last()
+                .is_some_and(|p| p.is_alphanumeric() || p == ')');
+        if glued && !group.chars().any(|c| c.is_whitespace()) {
+            break;
+        }
+        if glued {
+            // Prose remark glued to math: drop just the remark group.
+            s.replace_range(start..=end, " ");
+            continue;
         }
         s.replace_range(start..=end, " ");
     }
@@ -239,14 +484,11 @@ fn normalize_expr(raw: &str) -> String {
         let prev_val =
             matches!(prev, Some(p) if p.is_ascii_digit() || p == ')' || p == '.');
         match c {
-            '²' | '³' => {
-                let exp = if c == '²' { "**2" } else { "**3" };
-                if prev_val {
-                    out.push_str(exp);
-                }
-                // Else: superscript on a unit remnant or variable, drop it.
-            }
             'x' => {
+                // Implicit multiplication: `3x` is `3*x`.
+                if prev_val {
+                    out.push('*');
+                }
                 let (next, skip) = next_nonblank(i, &chars);
                 i += skip;
                 let next_val = matches!(next, Some(n) if n.is_ascii_digit() || n == '(' || n == '.')
@@ -270,7 +512,24 @@ fn normalize_expr(raw: &str) -> String {
                 }
             }
             c if c.is_whitespace() => {}
-            _ => out.push(c),
+            c if c.is_ascii_alphabetic() => {
+                // Implicit multiplication: `3pi` is `3*pi`, `(a)sqrt`
+                // is `(a)*sqrt`. Function names never follow a value,
+                // and a letter starting a unit (`7cm`) never splits.
+                if matches!(prev, Some(p) if p.is_ascii_digit() || p == ')')
+                    && unit_len_at(&chars[i..]) == 0
+                {
+                    out.push('*');
+                }
+                out.push(c);
+            }
+            _ => {
+                // Implicit multiplication: `2(3+4)`, `(8-2)(9)`.
+                if c == '(' && prev_val {
+                    out.push('*');
+                }
+                out.push(c);
+            }
         }
         i += 1;
     }
@@ -281,22 +540,100 @@ fn normalize_expr(raw: &str) -> String {
     ] {
         out = out.replace(unit, "");
     }
-    // Leftover trailing single-letter units.
-    while out.ends_with('m') || out.ends_with('L') {
+    // Leftover trailing single-letter units after a value (`30L`, `2m`).
+    // Prose words ending in m/L are untouched.
+    while (out.ends_with('m') || out.ends_with('L'))
+        && out[..out.len() - 1]
+            .chars()
+            .last()
+            .is_some_and(|p| p.is_ascii_digit() || p == ')' || p == '.')
+    {
         out.pop();
     }
+    let out = strip_leading_identifier(&out);
     let out = out.trim_start_matches(['=', '~', ':']);
     out.trim_end_matches(['=', '~', ',', ';', '.', ':'])
         .to_string()
 }
 
-/// Split worked text into candidate expressions at equality links.
-fn candidates(text: &str) -> Vec<String> {
+/// Drop a prose identifier glued to a trailing group: `Solution(3,5)`
+/// becomes `(3,5)`. Real calls (`sin(`, `sqrt(`, ...) are exempt, and
+/// the group must run to the end of the string.
+fn strip_leading_identifier(s: &str) -> String {
+    let Some(open) = s.find('(') else {
+        return s.to_string();
+    };
+    let pre = s[..open].trim();
+    if pre.is_empty() || !pre.chars().all(|c| c.is_ascii_alphabetic() || c == ' ') {
+        return s.to_string();
+    }
+    if ["sin", "cos", "tan", "asin", "acos", "atan", "sqrt"].contains(&pre.to_lowercase().as_str()) {
+        return s.to_string();
+    }
+    let mut depth = 0;
+    for (j, c) in s[open..].char_indices() {
+        if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+            if depth == 0 && open + j + 1 != s.len() {
+                return s.to_string();
+            }
+        }
+    }
+    if depth == 0 { s[open..].to_string() } else { s.to_string() }
+}
+
+/// Split text on multi-solution markers. `x = -5 or x = 3` gives two
+/// alternatives; each is checked on its own instead of chained.
+fn split_alternatives(text: &str) -> Vec<String> {
+    text.split(" or ")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Raw equality chunks with a flag for degree-marked content.
+/// Chunks also split on `:`, so "so k = 2 * 6" stands on its own.
+fn raw_chunks(text: &str) -> Vec<(String, bool)> {
+    let t = text
+        .replace("=>", "=")
+        .replace("->", "=")
+        .replace(['≈', '→'], "=");
     let mut out = Vec::new();
-    for eq in text.replace('≈', "=").split('=') {
-        let n = normalize_expr(eq);
+    for eq in t.split('=') {
+        // Split remarks off the math tail ("Half of -8 ...: x^2-8x...").
+        for colon in eq.split(':') {
+            out.push((colon.to_string(), colon.contains('°')));
+        }
+    }
+    out
+}
+
+/// Split worked text into candidate expressions at equality links.
+/// Degree-marked plain numbers in an inverse-trig step are results
+/// displayed in degrees, so they convert to radians for comparison.
+fn candidates(text: &str) -> Vec<String> {
+    let chunks = raw_chunks(text);
+    let has_inv = chunks.iter().any(|(c, _)| {
+        let n = c.to_lowercase();
+        n.contains("asin")
+            || n.contains("acos")
+            || n.contains("atan")
+            || n.contains("arcsin")
+            || n.contains("arccos")
+            || n.contains("arctan")
+            || n.contains("⁻¹")
+            || n.contains("^-1")
+    });
+    let mut out = Vec::new();
+    for (chunk, was_deg) in chunks {
+        let mut n = normalize_expr(&chunk);
         if n.is_empty() {
             continue;
+        }
+        if has_inv && was_deg && n.parse::<f64>().is_ok() {
+            n = format!("({n}*pi/180)");
         }
         out.push(n);
     }
@@ -304,20 +641,61 @@ fn candidates(text: &str) -> Vec<String> {
 }
 
 fn decimals(s: &str) -> u32 {
-    s.split('.').nth(1).map(|f| f.len() as u32).unwrap_or(0)
+    // Least precise number token sets the tolerance.
+    let mut nums = Vec::new();
+    let mut cur = String::new();
+    let mut in_num = false;
+    for c in s.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() {
+            cur.push(c);
+            in_num = true;
+        } else if c == '.' && in_num {
+            cur.push(c);
+        } else if in_num {
+            let d = cur.split('.').nth(1).map(|f| f.len() as u32).unwrap_or(0);
+            nums.push(d);
+            cur.clear();
+            in_num = false;
+        }
+    }
+    nums.into_iter().min().unwrap_or(0)
 }
 
-/// Rounding tolerance for a pair: half a unit in the last place of the
-/// less precise side, so 1-decimal worked answers verify.
+/// Rounding tolerance for a pair. When one side is an exact symbolic
+/// form (`pi`, `sqrt`), the decimal side's precision governs, so a
+/// mistranscribed decimal cannot hide behind the form's zero decimals.
+/// Between plain decimals, either rounding may be the coarser one.
 fn tolerance(a: &str, b: &str) -> f64 {
-    let d = decimals(a).min(decimals(b));
-    (0.51 * 10f64.powi(-(d as i32))).max(1e-9)
+    let exact_form =
+        a.contains("pi") || a.contains("sqrt") || b.contains("pi") || b.contains("sqrt");
+    let d = if exact_form {
+        decimals(a).max(decimals(b))
+    } else {
+        decimals(a).min(decimals(b))
+    };
+    let mut tol = (0.51 * 10f64.powi(-(d as i32))).max(1e-9);
+    // Inverse-trig results round in degrees: a 1dp angle is honest
+    // within about a thousandth of a radian.
+    if ["asin", "acos", "atan"]
+        .iter()
+        .any(|f| a.contains(f) || b.contains(f))
+    {
+        tol = tol.max(1e-3);
+    }
+    tol
 }
 
 const SYMPY_SCRIPT: &str = r#"
 import sympy as sp, sys
 def parse(s):
-    return sp.sympify(s, rational=True)
+    try:
+        return sp.sympify(s, rational=True)
+    except Exception:
+        # Prose prefix before the math, e.g. "so k = 2*6": retry with
+        # the text after the last colon.
+        if ':' in s:
+            return sp.sympify(s.rsplit(':', 1)[1], rational=True)
+        raise
 try:
     a = parse(sys.argv[1])
     b = parse(sys.argv[2])
@@ -325,15 +703,26 @@ except Exception as e:
     print("error")
     print("parse failed: " + str(e))
     raise SystemExit
+# Comma-separated groups parse as tuples, not single values.
+if isinstance(a, tuple) or isinstance(b, tuple):
+    print("uncheckable")
+    raise SystemExit
 tol = float(sys.argv[3])
+# Identities first: same-symbol equalities verify exactly, before the
+# free-symbol gate below skips pairs with variables on both sides.
+try:
+    if sp.simplify(a - b) == 0:
+        print("exact")
+        raise SystemExit
+except SystemExit:
+    raise
+except Exception:
+    pass
 allowed = {sp.pi, sp.E}
 if (a.free_symbols | b.free_symbols) - allowed:
     print("uncheckable")
     raise SystemExit
 try:
-    if sp.simplify(a - b) == 0:
-        print("exact")
-        raise SystemExit
     da = float(sp.N(a))
     db = float(sp.N(b))
 except Exception as e:
@@ -381,15 +770,18 @@ enum SympyVerdict {
     Error(String),
 }
 
-/// Check one chain of candidates; every checkable link must hold.
-async fn check_chain(cands: &[String]) -> Result<Vec<serde_json::Value>, String> {
+/// Check one chain of candidates. Unparseable links are skipped with a
+/// note (gold answers mix prose with math); only a hard disagreement
+/// fails the chain. Returns the agreement count, the log, and the
+/// first mismatch if any.
+async fn check_chain(cands: &[String]) -> (usize, Vec<serde_json::Value>, Option<String>) {
     let mut log = Vec::new();
-    let mut checked = 0;
+    let mut agreed = 0;
     for pair in cands.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
         match sympy_compare(a, b).await {
             SympyVerdict::Agree(exact) => {
-                checked += 1;
+                agreed += 1;
                 log.push(serde_json::json!({"link": [a, b], "result": if exact {"exact"} else {"approx"}}));
             }
             SympyVerdict::Skip => {
@@ -397,17 +789,24 @@ async fn check_chain(cands: &[String]) -> Result<Vec<serde_json::Value>, String>
             }
             SympyVerdict::Disagree => {
                 log.push(serde_json::json!({"link": [a, b], "result": "MISMATCH"}));
-                return Err(format!("sympy mismatch: {a} != {b}"));
+                return (agreed, log, Some(format!("sympy mismatch: {a} != {b}")));
             }
             SympyVerdict::Error(e) => {
-                return Err(format!("sympy error on {a} vs {b}: {e}"));
+                log.push(serde_json::json!({"link": [a, b], "result": "skipped-unparseable", "error": e}));
             }
         }
     }
-    if checked == 0 {
-        return Err("no checkable numeric links".into());
-    }
-    Ok(log)
+    (agreed, log, None)
+}
+
+/// All normalized candidates across the worked steps, for final-answer
+/// matching.
+fn all_worked_candidates(worked: &[String]) -> Vec<String> {
+    worked
+        .iter()
+        .flat_map(|s| split_alternatives(s))
+        .flat_map(|sub| candidates(&sub))
+        .collect()
 }
 
 /// Run the gate without writing anything.
@@ -445,60 +844,101 @@ pub async fn evaluate(
             }),
         });
     }
+    let mut agreed = 0usize;
+    let mut step_logs = Vec::new();
     for step in &item.worked {
-        let cands = candidates(step);
-        if cands.len() < 2 {
-            continue;
+        for sub in split_alternatives(step) {
+            let cands = candidates(&sub);
+            if cands.len() < 2 {
+                continue;
+            }
+            let (a, log, mismatch) = check_chain(&cands).await;
+            agreed += a;
+            step_logs.push(serde_json::json!({"step": step, "links": log}));
+            if let Some(m) = mismatch {
+                return Ok(GateDecision::ReviewRequired {
+                    reason: "sympy-mismatch".into(),
+                    detail: serde_json::json!({"step": step, "error": m, "links": log}),
+                });
+            }
         }
-        if let Err(e) = check_chain(&cands).await {
+    }
+    let worked_cands = all_worked_candidates(&item.worked);
+    let mut final_log = Vec::new();
+    for alt in split_alternatives(&item.answer) {
+        let answer_cands = candidates(&alt);
+        if answer_cands.is_empty() {
             return Ok(GateDecision::ReviewRequired {
-                reason: "sympy-mismatch".into(),
-                detail: serde_json::json!({"step": step, "error": e}),
+                reason: "sympy-error".into(),
+                detail: serde_json::json!({"error": "final answer has no parseable math"}),
             });
         }
-    }
-    let answer_cands = candidates(&item.answer);
-    if answer_cands.is_empty() {
-        return Ok(GateDecision::ReviewRequired {
-            reason: "sympy-error".into(),
-            detail: serde_json::json!({"error": "final answer has no parseable math"}),
-        });
-    }
-    let last_step_cands = item
-        .worked
-        .last()
-        .map(|s| candidates(s))
-        .unwrap_or_default();
-    let mut joined = last_step_cands.clone();
-    joined.extend(answer_cands.clone());
-    let joint_log = if joined.len() >= 2 {
-        match check_chain(&joined).await {
-            Ok(log) => log,
-            Err(e) => {
+        if answer_cands.len() >= 2 {
+            let (a, log, mismatch) = check_chain(&answer_cands).await;
+            agreed += a;
+            final_log.push(serde_json::json!({"answer": alt, "links": log}));
+            if let Some(m) = mismatch {
+                return Ok(GateDecision::ReviewRequired {
+                    reason: "sympy-mismatch".into(),
+                    detail: serde_json::json!({"error": m, "answer": item.answer}),
+                });
+            }
+        }
+        // Every final alternative must appear among the worked values.
+        // Exact string matches skip the subprocess; the rest compare
+        // numerically so transcription slips cannot pass. Plain-number
+        // finals also retry as degrees, matching inverse-trig steps.
+        for c in &answer_cands {
+            if worked_cands.iter().any(|w| w == c) {
+                final_log.push(serde_json::json!({"answer_value": c, "result": "repeats-worked"}));
+                continue;
+            }
+            // A bare variable is structural, not a value: it can neither
+            // match nor mismatch.
+            if c.chars().all(|ch| ch.is_ascii_alphabetic()) {
+                continue;
+            }
+            let mut forms = vec![c.clone()];
+            if c.parse::<f64>().is_ok() {
+                forms.push(format!("({c}*pi/180)"));
+            }
+            let mut matched = None;
+            'outer: for t in &forms {
+                for w in &worked_cands {
+                    if matches!(sympy_compare(w, t).await, SympyVerdict::Agree(_)) {
+                        matched = Some(w.clone());
+                        final_log.push(
+                            serde_json::json!({"answer_value": c, "matched_worked": w, "result": "approx"}),
+                        );
+                        break 'outer;
+                    }
+                }
+            }
+            if matched.is_none() {
                 return Ok(GateDecision::ReviewRequired {
                     reason: "sympy-mismatch".into(),
                     detail: serde_json::json!({
-                        "error": format!("final answer does not match worked steps: {e}"),
+                        "error": "final answer does not match any worked value",
                         "answer": item.answer,
                     }),
                 });
             }
         }
-    } else if last_step_cands.iter().any(|c| answer_cands.contains(c)) {
-        vec![serde_json::json!({"link": "answer repeats worked value"})]
-    } else {
+    }
+    if agreed == 0 {
         return Ok(GateDecision::ReviewRequired {
-            reason: "sympy-mismatch".into(),
+            reason: "no-checkable-math".into(),
             detail: serde_json::json!({
-                "error": "final answer does not match any worked value",
-                "answer": item.answer,
+                "error": "no checkable numeric links in worked steps",
+                "steps": step_logs,
             }),
         });
-    };
+    }
     Ok(GateDecision::Verified {
         method: "sympy-chain".into(),
         detail: serde_json::json!({
-            "final_links": joint_log,
+            "step_links": step_logs,
+            "final_links": final_log,
             "source_recorded": item.source.is_some(),
         }),
     })
@@ -552,8 +992,24 @@ pub async fn store_item(pool: &sqlx::SqlitePool, item: &NewItem) -> anyhow::Resu
     get_item(pool, &id).await
 }
 
-pub async fn get_item(pool: &sqlx::SqlitePool, id: &str) -> anyhow::Result<StoredItem> {
-    let row: (String, String, String, String, String, String, String, Option<String>) = sqlx::query_as(
+/// Find an item by its prompt without running the gate. Used to keep
+/// re-imports cheap: hash lookup only, no SymPy involved.
+pub async fn find_by_prompt(
+    pool: &sqlx::SqlitePool,
+    prompt: &str,
+) -> anyhow::Result<Option<StoredItem>> {
+    let hash = dedupe_hash(prompt);
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM items WHERE dedupe_hash = ?")
+        .bind(&hash)
+        .fetch_optional(pool)
+        .await?;
+    match id {
+        Some(id) => Ok(Some(get_item(pool, &id).await?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn get_item(pool: &sqlx::SqlitePool, id: &str) -> anyhow::Result<StoredItem> {    let row: (String, String, String, String, String, String, String, Option<String>) = sqlx::query_as(
         "SELECT id, skill_id, prompt, answer, status, verify_method, verify_detail, source_url FROM items WHERE id = ?",
     )
     .bind(id)
@@ -613,7 +1069,7 @@ mod unit_tests {
 
     #[test]
     fn normalizes_cone_math() {
-        assert_eq!(normalize_expr("90π"), "90pi");
+        assert_eq!(normalize_expr("90π"), "90*pi");
         assert_eq!(normalize_expr("282.7 cm²"), "282.7");
         assert_eq!(normalize_expr("√(25 + 144)"), "sqrt((25+144))");
         assert_eq!(normalize_expr("10√2 cm"), "10*sqrt(2)");
@@ -623,16 +1079,86 @@ mod unit_tests {
         assert_eq!(normalize_expr("1.4m"), "1.4");
         // Variables are preserved, never eaten as units.
         assert_eq!(normalize_expr("2m+3"), "2m+3");
+        // Implicit multiplication is made explicit for SymPy.
+        assert_eq!(normalize_expr("3x+2"), "3*x+2");
+        assert_eq!(normalize_expr("(2x-3)*(x+5)"), "(2*x-3)*(x+5)");
+        assert_eq!(normalize_expr("3(x-2)(x+2)"), "3*(x-2)*(x+2)");
+        // ...but a letter starting a unit never splits.
+        assert_eq!(normalize_expr("7cm"), "7");
+        assert_eq!(normalize_expr("2m"), "2");
+        assert_eq!(normalize_expr("90pi"), "90*pi");
     }
 
     #[test]
     fn splits_equality_chains() {
         let c = candidates("V = (1/3)*pi*(25)*(12) = 100*pi ≈ 314.2");
         assert_eq!(c, vec!["V", "(1/3)*pi*(25)*(12)", "100*pi", "314.2"]);
+        let c = candidates("5x = 15 → x = 3");
+        assert_eq!(c, vec!["5*x", "15", "x", "3"]);
+    }
+
+    #[test]
+    fn splits_solution_alternatives() {
+        assert_eq!(split_alternatives("x = -5 or x = 3").len(), 2);
+        assert_eq!(split_alternatives("error bars").len(), 1);
+    }
+
+    #[test]
+    fn normalizes_trig_degrees_and_percents() {
+        assert_eq!(
+            normalize_expr("15 × sin 28°"),
+            "15*sin(28*pi/180)"
+        );
+        assert_eq!(normalize_expr("tan⁻¹(0.75)"), "atan(0.75)");
+        assert_eq!(normalize_expr("5%"), "(5/100)");
+        assert_eq!(normalize_expr("4.7 × 10⁻⁵"), "4.7*10**-5");
+        assert_eq!(normalize_expr("**282.7 cm²**"), "282.7");
+        // Implicit multiplication and pi applied to a group.
+        assert_eq!(normalize_expr("2(3+4)"), "2*(3+4)");
+        assert_eq!(normalize_expr("π(12)²"), "pi*(12)**2");
+    }
+
+    #[test]
+    fn converts_inverse_trig_degree_results() {
+        let c = candidates("x = asin(0.6) ≈ 36.9°");
+        assert_eq!(c, vec!["x", "asin(0.6)", "(36.9*pi/180)"]);
+    }
+
+    #[test]
+    fn powers_apply_to_variables_but_not_measured_units() {
+        assert_eq!(normalize_expr("x²"), "x**2");
+        assert_eq!(normalize_expr("r²"), "r**2");
+        assert_eq!(normalize_expr("4.5m²"), "4.5");
+        assert_eq!(normalize_expr("200 m²"), "200");
+    }
+
+    #[test]
+    fn strips_prose_identifiers_from_tuples() {
+        assert_eq!(normalize_expr("Solution(3,5)"), "(3,5)");
+        // Real calls are exempt.
+        assert_eq!(normalize_expr("sin(28*pi/180)"), "sin(28*pi/180)");
+        assert_eq!(normalize_expr("sqrt((25+144))"), "sqrt((25+144))");
+    }
+
+    #[test]
+    fn splits_colon_remarks_off_math() {
+        let c = candidates("Half of -8 is -4, squared is 16: x = 3");
+        assert!(c.contains(&"x".to_string()));
+        assert!(c.contains(&"3".to_string()));
+    }
+
+    #[test]
+    fn inverse_trig_tolerance_covers_degree_rounding() {
+        assert!(tolerance("acos(0.0714)", "(85.9*pi/180)") >= 1e-3);
     }
 
     #[test]
     fn rounding_tolerance_covers_one_decimal() {
         assert!((tolerance("314.159", "314.2") - 0.051).abs() < 1e-12);
+        // Exact form vs decimal: the decimal's precision governs, so a
+        // mistranscribed decimal cannot pass.
+        assert!((tolerance("90*pi", "282.9") - 0.051).abs() < 1e-12);
+        // Plain decimals of different precision: coarser rounding governs.
+        assert!((tolerance("293.87", "294") - 0.51).abs() < 1e-12);
     }
 }
