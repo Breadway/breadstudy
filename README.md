@@ -13,7 +13,9 @@ See `DESIGN.md` for the full loop and `spec/` for the session state machine.
 
 ## Status
 
-P0 spike in progress: Breeze Vulkan build plus one verified Volume/SA loop. Assessment 2026-11-10 is Test 6 (Volume, Capacity and Surface Area).
+Live at https://study.breadway.dev (container on Hestia, Aegis edge). The vault indexer, item bank with SymPy gate, seed bank, planner, session engine, FSRS mastery, photo grading, Breeze TTS broker, whisper STT, PWA, Gotify reminders, friction client and weekly review are merged.
+
+DeepSeek V4.1 Flash grades through the OpenCode Go API (`BREADSTUDY_LLM_*`), with local llama.cpp fallbacks marked degraded. Regenerate the item bank with `breadstudy-seed` after changing the vault.
 
 ## Layout
 
