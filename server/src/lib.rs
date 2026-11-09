@@ -9,3 +9,4 @@ pub mod speech;
 pub mod stt;
 
 pub use error::{Error, Result};
+pub mod session;
