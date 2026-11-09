@@ -1,5 +1,10 @@
 name: check
-on: [push, pull_request]
+# One run per change: pull requests cover branches, and main is checked after
+# merge. Triggering on every branch push duplicated the whole queue.
+on:
+  pull_request:
+  push:
+    branches: [main]
 jobs:
   check:
     runs-on: hestia
