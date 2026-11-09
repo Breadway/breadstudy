@@ -1,0 +1,16 @@
+[Unit]
+Description=breadstudy breeze-server TTS broker (STUDY-10)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/breadstudy
+Environment=BREEZE_LISTEN=127.0.0.1:7312
+Environment=BREEZE_CACHE_DIR=%h/breadstudy/data/breeze-cache
+Environment=BREEZE_UPSTREAM_URL=http://127.0.0.1:7313
+ExecStart=%h/breadstudy/target/release/breeze-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
