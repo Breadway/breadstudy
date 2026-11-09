@@ -90,6 +90,12 @@ textarea, input[type="text"] {
   font-size: 1rem;
 }
 .scratchpad { display: grid; gap: 8px; }
+#teach-board { display: grid; gap: 10px; min-height: 40px; }
+#teach-board p { margin: 0; line-height: 1.5; }
+#teach-board ol { margin: 0; padding-left: 22px; display: grid; gap: 4px; }
+.board-latex { overflow-x: auto; padding: 6px 0; }
+.board-svg { display: flex; justify-content: center; padding: 6px 0; }
+.board-svg svg { max-width: 100%; height: auto; max-height: 260px; }
 #scratch-preview {
   min-height: 88px;
   border: 1px solid var(--line);

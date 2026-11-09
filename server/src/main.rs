@@ -23,13 +23,24 @@ fn build_router(pool: SqlitePool, web_dir: PathBuf) -> anyhow::Result<Router> {
         grading: Arc::new(GradingService::from_env()?),
     };
     let web_root = web_dir.clone();
-    Ok(Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::skills_router(pool.clone()))
         .merge(api::session_router(pool.clone()))
         .merge(planner::router(pool.clone()))
         .merge(api::fsrs_routes().with_state(pool.clone()))
-        .merge(api::grading_router(grading))
+        .merge(api::grading_router(grading));
+
+    // The teacher scratchpad is optional: without a key the rest of the app
+    // still works, and the UI shows the failure instead of a blank pane.
+    match breadstudy_server::teach::TeachClient::from_env() {
+        Ok(client) => {
+            app = app.merge(breadstudy_server::teach::router(pool.clone(), client));
+        }
+        Err(error) => tracing::warn!("teacher scratchpad disabled: {error}"),
+    }
+
+    Ok(app
         .route(
             "/",
             get({
