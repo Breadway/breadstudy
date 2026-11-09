@@ -11,8 +11,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use breadstudy_server::api::{grade_attempt, GradingState};
 use breadstudy_server::grading::{
-    AttemptRequest, CriterionVerdict, Endpoint, ErrorTag, GradeFuture, GradeOutcome, GradeRequest,
-    Grader, GraderResponse, GradingService, HttpGrader, InputKind,
+    AttemptRequest, CriterionVerdict, Endpoint, ErrorTag, GradeError, GradeFuture, GradeOutcome,
+    GradeRequest, Grader, GraderResponse, GradingService, HttpGrader, InputKind,
 };
 use sqlx::SqlitePool;
 
@@ -485,10 +485,14 @@ async fn read_http_body(socket: &mut tokio::net::TcpStream) -> String {
     String::new()
 }
 
-/// Minimal OpenAI-compatible stub: rejects the primary model and answers
-/// the local fallback model, so the real failover path is exercised
-/// without any live model.
-async fn spawn_mock_grader(content: String) -> String {
+/// Minimal OpenAI-compatible stub: rejects the configured primary model
+/// and answers the local fallback model, so the real failover path is
+/// exercised without any live model.
+async fn spawn_mock_grader(
+    content: String,
+    reject_prefix: &'static str,
+    reject_status: &'static str,
+) -> String {
     use tokio::io::AsyncWriteExt;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -503,10 +507,10 @@ async fn spawn_mock_grader(content: String) -> String {
                 let body = read_http_body(&mut socket).await;
                 let request: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                 let model = request["model"].as_str().unwrap_or("");
-                let (status, payload) = if model.starts_with("Grok") {
+                let (status, payload) = if model.starts_with(reject_prefix) {
                     (
-                        "500 Internal Server Error",
-                        serde_json::json!({"error": "proxy down"}),
+                        reject_status,
+                        serde_json::json!({"error": "stub rejection"}),
                     )
                 } else {
                     (
@@ -539,13 +543,13 @@ async fn proxy_failure_fails_over_to_the_local_vision_model() {
         true,
     );
     let content = serde_json::to_string(&fallback).unwrap();
-    let base_url = spawn_mock_grader(content).await;
+    let base_url = spawn_mock_grader(content, "deepseek", "500 Internal Server Error").await;
 
     let grader = HttpGrader::new(
         Endpoint {
             base_url: base_url.clone(),
-            model: "Grok-4.7".into(),
-            api_key: None,
+            model: "deepseek-v4.1-flash".into(),
+            api_key: Some("test-key".into()),
         },
         vec![Endpoint {
             base_url,
@@ -566,6 +570,49 @@ async fn proxy_failure_fails_over_to_the_local_vision_model() {
     assert!(attempt.error_tags.contains(&ErrorTag::DroppedUnit));
     assert_eq!(attempt.method_marks, 1.0);
     assert_eq!(attempt_count(&pool).await, 1);
+
+    drop(pool);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
+async fn rejected_key_is_a_config_error_not_a_silent_fallback() {
+    let (db, pool) = setup("auth-failure").await;
+    let fallback = response(
+        Some("V = pi r^2 h = 63 pi = 197.9 cm3"),
+        0.8,
+        vec![verdict("formula", true, "formula recognized")],
+        true,
+        &[],
+        "",
+        true,
+    );
+    let content = serde_json::to_string(&fallback).unwrap();
+    let base_url = spawn_mock_grader(content, "deepseek", "401 Unauthorized").await;
+
+    let grader = HttpGrader::new(
+        Endpoint {
+            base_url: base_url.clone(),
+            model: "deepseek-v4.1-flash".into(),
+            api_key: Some("wrong-key".into()),
+        },
+        vec![Endpoint {
+            base_url,
+            model: "LFM3-Omni-2B-Q4_K_M".into(),
+            api_key: None,
+        }],
+    )
+    .unwrap();
+    let service = GradingService::new(Arc::new(grader), 0.75);
+
+    let error = service.grade(&pool, photo_request()).await.unwrap_err();
+    match error {
+        GradeError::Config(message) => {
+            assert!(message.contains("rejected the API key"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
+    assert_eq!(attempt_count(&pool).await, 0);
 
     drop(pool);
     let _ = std::fs::remove_file(&db);

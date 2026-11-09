@@ -41,6 +41,7 @@ pub async fn grade_attempt(
                 GradeError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 GradeError::ItemNotFound(_) => StatusCode::NOT_FOUND,
                 GradeError::AllGradersFailed(_) => StatusCode::BAD_GATEWAY,
+                GradeError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 GradeError::Db(_) | GradeError::Data(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             if status.is_server_error() {

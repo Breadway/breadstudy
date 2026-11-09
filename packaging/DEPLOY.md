@@ -8,6 +8,48 @@ curl -s http://127.0.0.1:7290/healthz
 
 Run compose as the `breadway` user, not root.
 
+## Grading model configuration (STUDY-17)
+
+The grader talks to an OpenAI-compatible endpoint. Defaults point at the
+OpenCode Go API; override them in `.env` or the shell when needed.
+
+| Variable | Default |
+|---|---|
+| `BREADSTUDY_LLM_BASE_URL` | `https://opencode.ai/zen/go/v1` |
+| `BREADSTUDY_LLM_MODEL` | `deepseek-v4.1-flash` |
+| `BREADSTUDY_LLM_API_KEY_FILE` | `/etc/breadstudy/llm.key`, then `$XDG_CONFIG_HOME/breadstudy/opencode-go.key` |
+| `BREADSTUDY_LLM_FALLBACK_BASE_URL` | `http://127.0.0.1:7301/v1` |
+| `BREADSTUDY_LLM_FALLBACK_MODELS` | `Ornith-1.5-9B-Q4_K_M,LFM3-Omni-2B-Q4_K_M` |
+| `BREADSTUDY_LLM_MIN_CONFIDENCE` | `0.75` |
+| `BREADSTUDY_LLM_KEY_HOST_PATH` | `/home/breadway/.config/breadstudy/opencode-go.key` |
+
+The API key is never committed, logged or baked into the image. It lives on
+the host outside the repo (the repo is public) with mode 600, and compose
+bind-mounts it read-only at `/etc/breadstudy/llm.key`:
+
+```sh
+install -d -m 700 ~/.config/breadstudy
+install -m 600 /dev/null ~/.config/breadstudy/opencode-go.key
+$EDITOR ~/.config/breadstudy/opencode-go.key   # paste the key, save
+stat -c '%a %n' ~/.config/breadstudy/opencode-go.key
+```
+
+Do not put `BREADSTUDY_LLM_API_KEY` in `.env` or compose: a direct value is
+visible through `docker inspect`. The file mount is the supported path.
+
+`HttpGrader::from_env` validates the key at startup. A missing or empty file
+fails with `no LLM API key found` and the paths it tried. A rejected key
+(401/403) surfaces as a configuration error and is not hidden by the local
+fallback. Only transient failures such as a timeout or 5xx fall through to
+the local vision models, marked degraded and graded at reduced quality.
+
+For a host binary run outside compose:
+
+```sh
+BREADSTUDY_LLM_API_KEY_FILE=$HOME/.config/breadstudy/opencode-go.key \
+  cargo run -p breadstudy-server
+```
+
 ## breeze-server TTS broker (STUDY-10)
 
 Local TTS broker on loopback port 7312 (BIPS id `breadstudy-tts-prod`).

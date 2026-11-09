@@ -7,22 +7,30 @@
 //!
 //! # Models
 //!
-//! Grading goes through the BMNS-001 name mapper on Hestia port 7406,
-//! which fronts CLIProxyAPI and exposes the canonical `Grok-4.7` id.
-//! When that proxy is unavailable the local vision models
-//! `Ornith-1.5-9B-Q4_K_M` and `LFM3-Omni-2B-Q4_K_M` are tried on the
-//! llama.cpp router (port 7301) at reduced quality. Canonical ids come
-//! from `model-registry.json`; nothing here invents a model name.
+//! The primary grader is an OpenAI-compatible endpoint configured by
+//! environment. It defaults to the OpenCode Go API and its
+//! `deepseek-v4.1-flash` model. Nothing is baked into the image or the
+//! repository: the API key is read from a file at call setup and never
+//! logged.
+//!
+//! When the primary is unavailable for a transient reason the local vision
+//! models `Ornith-1.5-9B-Q4_K_M` and `LFM3-Omni-2B-Q4_K_M` are tried on the
+//! llama.cpp router (port 7301) at reduced quality. Missing key material or
+//! a rejected key is a configuration error: it surfaces clearly instead of
+//! silently degrading to the local fallback.
 //!
 //! Environment overrides:
 //!
-//! - `BREADSTUDY_GRADING_URL` (default `http://127.0.0.1:7406/v1`)
-//! - `BREADSTUDY_GRADING_MODEL` (default `Grok-4.7`)
-//! - `BREADSTUDY_GRADING_API_KEY` (optional bearer token)
-//! - `BREADSTUDY_GRADING_FALLBACK_URL` (default `http://127.0.0.1:7301/v1`)
-//! - `BREADSTUDY_GRADING_FALLBACK_MODELS`
+//! - `BREADSTUDY_LLM_BASE_URL` (default `https://opencode.ai/zen/go/v1`)
+//! - `BREADSTUDY_LLM_MODEL` (default `deepseek-v4.1-flash`)
+//! - `BREADSTUDY_LLM_API_KEY_FILE` (default `/etc/breadstudy/llm.key`,
+//!   then `$XDG_CONFIG_HOME/breadstudy/opencode-go.key`)
+//! - `BREADSTUDY_LLM_API_KEY` (optional direct key, for tests or a
+//!   secret manager; prefer the file)
+//! - `BREADSTUDY_LLM_FALLBACK_BASE_URL` (default `http://127.0.0.1:7301/v1`)
+//! - `BREADSTUDY_LLM_FALLBACK_MODELS`
 //!   (default `Ornith-1.5-9B-Q4_K_M,LFM3-Omni-2B-Q4_K_M`)
-//! - `BREADSTUDY_GRADING_MIN_CONFIDENCE` (default `0.75`)
+//! - `BREADSTUDY_LLM_MIN_CONFIDENCE` (default `0.75`)
 //!
 //! # Transcription confidence
 //!
@@ -34,6 +42,7 @@
 //! `confirmed_text`.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -364,14 +373,106 @@ pub trait Grader: Send + Sync {
 }
 
 /// One OpenAI-compatible inference endpoint with a canonical model id.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Endpoint {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
 }
 
-/// Primary BMNS proxy grader with local reduced-quality fallbacks.
+/// Failures that must not be hidden by a fallback model.
+#[derive(Debug, thiserror::Error)]
+pub enum GraderError {
+    #[error("LLM configuration error: {0}")]
+    Config(String),
+    #[error("LLM request failed: {0}")]
+    Request(String),
+}
+
+const DEFAULT_LLM_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+const DEFAULT_LLM_MODEL: &str = "deepseek-v4.1-flash";
+const DEFAULT_LLM_KEY_FILE: &str = "/etc/breadstudy/llm.key";
+const DEFAULT_FALLBACK_BASE_URL: &str = "http://127.0.0.1:7301/v1";
+const DEFAULT_FALLBACK_MODELS: &str = "Ornith-1.5-9B-Q4_K_M,LFM3-Omni-2B-Q4_K_M";
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Key file search order: explicit path, the /etc default, then the XDG
+/// config path. A missing file is a clear configuration error.
+fn api_key_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env_non_empty("BREADSTUDY_LLM_API_KEY_FILE") {
+        push_unique(&mut candidates, PathBuf::from(path));
+    }
+    push_unique(&mut candidates, PathBuf::from(DEFAULT_LLM_KEY_FILE));
+    if let Some(config) = xdg_config_home() {
+        push_unique(
+            &mut candidates,
+            config.join("breadstudy").join("opencode-go.key"),
+        );
+    }
+    candidates
+}
+
+fn push_unique(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.contains(&path) {
+        candidates.push(path);
+    }
+}
+
+fn xdg_config_home() -> Option<PathBuf> {
+    env_non_empty("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env_non_empty("HOME").map(|home| PathBuf::from(home).join(".config")))
+}
+
+fn resolve_api_key(candidates: &[PathBuf]) -> anyhow::Result<String> {
+    let mut tried = Vec::new();
+    for path in candidates {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                let key = contents.trim();
+                if key.is_empty() {
+                    tried.push(format!("{} (empty)", path.display()));
+                } else {
+                    return Ok(key.to_string());
+                }
+            }
+            Err(error) => tried.push(format!("{} ({error})", path.display())),
+        }
+    }
+    anyhow::bail!(
+        "no LLM API key found; set BREADSTUDY_LLM_API_KEY_FILE or BREADSTUDY_LLM_API_KEY. Tried: {}",
+        tried.join(", ")
+    )
+}
+
+/// Read the key from an explicit env value or the first readable key file.
+/// The value is never logged.
+pub fn read_api_key() -> anyhow::Result<String> {
+    if let Some(key) = env_non_empty("BREADSTUDY_LLM_API_KEY") {
+        return Ok(key);
+    }
+    resolve_api_key(&api_key_candidates())
+}
+
+fn is_loopback_url(base_url: &str) -> bool {
+    base_url.contains("127.0.0.1") || base_url.contains("localhost") || base_url.contains("[::1]")
+}
+
+fn is_config_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<GraderError>()
+        .map(|error| matches!(error, GraderError::Config(_)))
+        .unwrap_or(false)
+}
+
+/// Primary configurable LLM grader with local reduced-quality fallbacks.
 pub struct HttpGrader {
     primary: Endpoint,
     fallbacks: Vec<Endpoint>,
@@ -391,17 +492,21 @@ impl HttpGrader {
     }
 
     /// Read endpoint configuration from the environment.
+    ///
+    /// This is the startup validation: if no key file is readable the
+    /// constructor fails with the paths it tried instead of starting a
+    /// server that silently degrades to the local model.
     pub fn from_env() -> anyhow::Result<Self> {
-        let base_url = std::env::var("BREADSTUDY_GRADING_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:7406/v1".into());
-        let model = std::env::var("BREADSTUDY_GRADING_MODEL").unwrap_or_else(|_| "Grok-4.7".into());
-        let api_key = std::env::var("BREADSTUDY_GRADING_API_KEY")
-            .ok()
-            .filter(|key| !key.trim().is_empty());
-        let fallback_url = std::env::var("BREADSTUDY_GRADING_FALLBACK_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:7301/v1".into());
-        let fallback_models = std::env::var("BREADSTUDY_GRADING_FALLBACK_MODELS")
-            .unwrap_or_else(|_| "Ornith-1.5-9B-Q4_K_M,LFM3-Omni-2B-Q4_K_M".into());
+        let base_url = env_non_empty("BREADSTUDY_LLM_BASE_URL")
+            .unwrap_or_else(|| DEFAULT_LLM_BASE_URL.to_string());
+        let model =
+            env_non_empty("BREADSTUDY_LLM_MODEL").unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string());
+        let api_key = read_api_key()
+            .map_err(|error| anyhow::anyhow!("grading configuration error: {error}"))?;
+        let fallback_url = env_non_empty("BREADSTUDY_LLM_FALLBACK_BASE_URL")
+            .unwrap_or_else(|| DEFAULT_FALLBACK_BASE_URL.to_string());
+        let fallback_models = env_non_empty("BREADSTUDY_LLM_FALLBACK_MODELS")
+            .unwrap_or_else(|| DEFAULT_FALLBACK_MODELS.to_string());
         let fallbacks = fallback_models
             .split(',')
             .map(str::trim)
@@ -412,11 +517,12 @@ impl HttpGrader {
                 api_key: None,
             })
             .collect();
+        tracing::info!(model = %model, base_url = %base_url, "configured primary grading model");
         Self::new(
             Endpoint {
                 base_url,
                 model,
-                api_key,
+                api_key: Some(api_key),
             },
             fallbacks,
         )
@@ -428,6 +534,12 @@ impl HttpGrader {
         request: &GradeRequest,
         reduced: bool,
     ) -> anyhow::Result<GraderResponse> {
+        if endpoint.api_key.is_none() && !is_loopback_url(&endpoint.base_url) {
+            return Err(anyhow::Error::new(GraderError::Config(format!(
+                "model {} needs an API key but {} is not a loopback endpoint; set BREADSTUDY_LLM_API_KEY_FILE",
+                endpoint.model, endpoint.base_url
+            ))));
+        }
         let prompt = build_prompt(request, reduced);
         let user_content = if let Some(photo) = &request.photo {
             json!([
@@ -465,6 +577,15 @@ impl HttpGrader {
         let response = builder.send().await?;
         let status = response.status();
         let text = response.text().await?;
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            return Err(anyhow::Error::new(GraderError::Config(format!(
+                "model {} rejected the API key with {status}",
+                endpoint.model
+            ))));
+        }
         if !status.is_success() {
             anyhow::bail!(
                 "model {} returned {status}: {}",
@@ -519,6 +640,9 @@ impl Grader for HttpGrader {
             match self.call(&self.primary, request, false).await {
                 Ok(response) => Ok(response),
                 Err(error) => {
+                    if is_config_error(&error) {
+                        return Err(error);
+                    }
                     tracing::warn!(
                         model = %self.primary.model,
                         error = %error,
@@ -533,10 +657,10 @@ impl Grader for HttpGrader {
                             }
                         }
                     }
-                    Err(anyhow::anyhow!(
+                    Err(anyhow::Error::new(GraderError::Request(format!(
                         "all grading models failed: {}",
                         errors.join("; ")
-                    ))
+                    ))))
                 }
             }
         })
@@ -678,6 +802,8 @@ pub enum GradeError {
     ItemNotFound(String),
     #[error("all grading models failed: {0}")]
     AllGradersFailed(String),
+    #[error("grading configuration error: {0}")]
+    Config(String),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error("grading data error: {0}")]
@@ -689,6 +815,13 @@ struct StoredItem {
     prompt: String,
     answer: String,
     rubric: String,
+}
+
+fn confidence_threshold_from_env() -> f32 {
+    std::env::var("BREADSTUDY_LLM_MIN_CONFIDENCE")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(0.75)
 }
 
 /// Grades attempts against item rubrics and records them.
@@ -705,12 +838,9 @@ impl GradingService {
         }
     }
 
-    pub fn from_env(grader: Arc<dyn Grader>) -> Self {
-        let threshold = std::env::var("BREADSTUDY_GRADING_MIN_CONFIDENCE")
-            .ok()
-            .and_then(|value| value.parse::<f32>().ok())
-            .unwrap_or(0.75);
-        Self::new(grader, threshold)
+    pub fn from_env() -> anyhow::Result<Self> {
+        let grader = HttpGrader::from_env()?;
+        Ok(Self::new(Arc::new(grader), confidence_threshold_from_env()))
     }
 
     pub async fn grade(
@@ -809,11 +939,14 @@ impl GradingService {
             given: given.clone(),
             photo,
         };
-        let response = self
-            .grader
-            .grade(&grade_request)
-            .await
-            .map_err(|error| GradeError::AllGradersFailed(error.to_string()))?;
+        let response =
+            self.grader.grade(&grade_request).await.map_err(|error| {
+                match error.downcast::<GraderError>() {
+                    Ok(GraderError::Config(message)) => GradeError::Config(message),
+                    Ok(GraderError::Request(message)) => GradeError::AllGradersFailed(message),
+                    Err(other) => GradeError::AllGradersFailed(other.to_string()),
+                }
+            })?;
 
         let answer_text = if let Some(text) = given {
             text
@@ -1207,5 +1340,27 @@ mod unit_tests {
     fn unknown_tags_are_dropped() {
         assert_eq!(ErrorTag::parse("sign_slip"), Some(ErrorTag::SignSlip));
         assert_eq!(ErrorTag::parse("made-up"), None);
+    }
+
+    #[test]
+    fn key_file_is_read_and_trimmed() {
+        let dir = std::env::temp_dir().join(format!("breadstudy-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("llm.key");
+        std::fs::write(&path, "  test-key-value\n").unwrap();
+        assert_eq!(resolve_api_key(&[path]).unwrap(), "test-key-value");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_key_file_is_a_clear_error() {
+        let path =
+            std::env::temp_dir().join(format!("breadstudy-missing-key-{}.key", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let error = resolve_api_key(std::slice::from_ref(&path))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no LLM API key found"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
     }
 }
