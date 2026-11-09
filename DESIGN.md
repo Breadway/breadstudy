@@ -11,12 +11,12 @@ Year 10 Maths study needs a loop that decides what to do, runs a timed session, 
 3. Items: seeded from the six Practice sets with worked answers (gold, re-checked with SymPy). Generated items carry rubric, hints, expected time, difficulty, source URLs. Symbolic/numeric answers gate on SymPy before entering the bank. Unverifiable items (proofs, geometric reasoning) stay `review_required` until approved once.
 4. Grading: photo, typed LaTeX, or spoken. Method marks plus final answer. Error tags: sign-slip, dropped-unit, wrong-formula, algebra, conceptual.
 5. Memory: attempts, mastery per skill, error patterns, session and intervention log. Weekly review generated from this.
-6. Write-back: scratchpad explanations with KaTeX, saved to the vault under a marked agent section or `_agent/` folder. Never silently rewrites notes. Small review queue.
+6. Teaching board: the model authors explanations on the scratchpad (prose, LaTeX, steps and SVG diagrams) through `POST /api/teach`, revealed in sequence. The student asks, the tutor draws. Explanations can be saved to the vault under a marked agent section or `_agent/` folder. Never silently rewrites notes. Small review queue.
 
 ## Surfaces
 
 - Hestia server (Rust axum + SQLite, litestream, port 7220, study.breadway.dev)
-- Web PWA (session view, scratchpad, dashboard, camera/mic input)
+- Web PWA (session view, teacher board, dashboard, camera/mic input)
 - Hermes friction client (workspace switch, hide distractions, DND, timer, focus events, skip + grace tokens)
 - Phone (PWA + Gotify, optional ICS feed to Nextcloud)
 

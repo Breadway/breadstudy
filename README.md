@@ -23,4 +23,4 @@ DeepSeek V4.1 Flash grades through the OpenCode Go API (`BREADSTUDY_LLM_*`), wit
 - `migrations/` - SQLite schema
 - `packaging/` - Containerfile, compose, litestream, DEPLOY
 - `spec/` - session state machine, FSRS params, skill map
-- `web/` - PWA session view and scratchpad (scaffold)
+- `web/` - PWA session view, model-authored teaching board, dashboard
