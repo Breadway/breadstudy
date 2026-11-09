@@ -8,6 +8,10 @@ license.workspace = true
 name = "breadstudy-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "breeze-server"
+path = "src/bin/breeze-server.rs"
+
 [lib]
 name = "breadstudy_server"
 path = "src/lib.rs"
@@ -25,3 +29,7 @@ uuid.workspace = true
 reqwest.workspace = true
 axum.workspace = true
 sqlx.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
