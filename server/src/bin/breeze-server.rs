@@ -163,9 +163,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let broker = Broker::new(
         env_or("BREEZE_CACHE_DIR", "data/breeze-cache"),
-        env_or("BREEZE_UPSTREAM_URL", "http://127.0.0.1:7311"),
+        env_or("BREEZE_UPSTREAM_URL", "http://127.0.0.1:7313"),
     );
-    let listen = env_or("BREEZE_LISTEN", "127.0.0.1:7310");
+    let listen = env_or("BREEZE_LISTEN", "127.0.0.1:7312");
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     tracing::info!("breeze-server listening on {listen}");
     axum::serve(listener, router(broker)).await?;
