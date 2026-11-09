@@ -5,6 +5,7 @@
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use sqlx::SqlitePool;
 
+use breadstudy_server::fsrs::{self, AttemptInput};
 use breadstudy_server::session::{self, Phase, SessionEngine, StartOptions, Template};
 
 fn t0() -> chrono::DateTime<Utc> {
@@ -47,11 +48,12 @@ async fn seed_bank(pool: &SqlitePool) {
         let (skill, _) = skills[index % skills.len()];
         let id = format!("item-{index:02}");
         let prompt = format!("Prompt {id}: find the value.");
-        let hints = serde_json::json!([
-            format!("first hint for {id}"),
-            format!("second hint for {id}")
-        ])
-        .to_string();
+        // Three escalating rungs so the authored ladder from STUDY-18
+        // validates and hint_state can own the cursor.
+        let first = format!("first hint for {id}");
+        let second = format!("{first}. Name the rule before substituting.");
+        let third = format!("{second} Carry the working to the final line and check units.");
+        let hints = serde_json::json!([first, second, third]).to_string();
         sqlx::query(
             "INSERT INTO items(id, skill_id, prompt, answer, hints, status) \
              VALUES(?,?,?,?,?,'verified')",
@@ -93,7 +95,7 @@ async fn school_day_runs_end_to_end_from_cache() {
     let item = started.item.as_ref().expect("cached recall item");
     assert!(item.prompt.starts_with("Prompt item-"));
     assert_eq!(item.audio_path.as_deref(), Some("cache/audio/item-00.wav"));
-    assert_eq!(item.hint_count, 2);
+    assert_eq!(item.hint_count, 3);
     assert!(item.hints.is_empty(), "locked hints must not leak");
 
     let practice = session::tick(&pool, &started.id, at(120))
@@ -329,8 +331,16 @@ async fn hints_are_unlocked_from_cache_and_items_can_advance() {
         .await
         .unwrap()
         .expect("session");
-    assert!(third.hint.is_none());
-    assert_eq!(third.hints_used, 2);
+    assert!(third.hint.is_some());
+    assert_eq!(third.hints_used, 3);
+    assert_eq!(third.session.item.as_ref().unwrap().hints.len(), 3);
+
+    let fourth = session::hint(&pool, &started.id, t0())
+        .await
+        .unwrap()
+        .expect("session");
+    assert!(fourth.hint.is_none());
+    assert_eq!(fourth.hints_used, 3);
 
     let practice = session::advance(&pool, &started.id, t0())
         .await
@@ -348,6 +358,165 @@ async fn hints_are_unlocked_from_cache_and_items_can_advance() {
     let events = session::events(&pool, &started.id).await.unwrap();
     assert!(events.iter().any(|event| event.kind == "hint"));
     assert!(events.iter().any(|event| event.kind == "item"));
+    cleanup(&db);
+}
+
+#[tokio::test]
+async fn graded_session_updates_fsrs_and_hint_state_is_the_only_counter() {
+    let (pool, db) = test_pool("graded-fsrs").await;
+    seed_bank(&pool).await;
+
+    let started = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    let recall_item = started.item.as_ref().expect("recall item").id.clone();
+
+    session::hint(&pool, &started.id, t0()).await.unwrap();
+    let hinted_view = session::hint(&pool, &started.id, t0())
+        .await
+        .unwrap()
+        .expect("session");
+    assert_eq!(hinted_view.hints_used, 2);
+
+    let hinted = session::grade(
+        &pool,
+        &started.id,
+        AttemptInput {
+            item_id: recall_item.clone(),
+            input_kind: "typed".into(),
+            given: "42".into(),
+            correct: true,
+            session_id: None,
+            error_tags: vec![],
+        },
+        t0(),
+    )
+    .await
+    .unwrap()
+    .expect("graded");
+    assert_eq!(hinted.attempt.hints_used, 2);
+    assert_eq!(hinted.attempt.rating, 2, "two hints are a Hard success");
+    assert_eq!(
+        hinted.session.hints_used, 0,
+        "the ladder resets after grading and the view mirrors hint_state"
+    );
+    let stored_mastery: f64 =
+        sqlx::query_scalar("SELECT mastery FROM skill_schedule WHERE skill_id = ?")
+            .bind(&hinted.attempt.skill_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!((stored_mastery - hinted.attempt.mastery_after).abs() < 1e-9);
+
+    // An unaided success on the same template must gain more mastery than
+    // the hint-assisted one.
+    let practice = session::advance(&pool, &started.id, t0())
+        .await
+        .unwrap()
+        .expect("session");
+    let practice_item = practice.item.as_ref().expect("practice item").id.clone();
+    let unaided = session::grade(
+        &pool,
+        &started.id,
+        AttemptInput {
+            item_id: practice_item,
+            input_kind: "typed".into(),
+            given: "42".into(),
+            correct: true,
+            session_id: None,
+            error_tags: vec![],
+        },
+        t0(),
+    )
+    .await
+    .unwrap()
+    .expect("graded");
+    assert_eq!(unaided.attempt.rating, 4);
+    assert!(
+        hinted.attempt.mastery_after < unaided.attempt.mastery_after,
+        "hint use must downgrade the mastery gain: {} vs {}",
+        hinted.attempt.mastery_after,
+        unaided.attempt.mastery_after
+    );
+
+    // Grading a wrong attempt updates the per-skill error patterns.
+    for _ in 0..2 {
+        session::grade(
+            &pool,
+            &started.id,
+            AttemptInput {
+                item_id: "item-03".into(),
+                input_kind: "typed".into(),
+                given: "0".into(),
+                correct: false,
+                session_id: None,
+                error_tags: vec!["sign-error".into()],
+            },
+            t0(),
+        )
+        .await
+        .unwrap()
+        .expect("graded");
+    }
+
+    let ended = session::tick(&pool, &started.id, at(1200))
+        .await
+        .unwrap()
+        .expect("session");
+    assert_eq!(ended.outcome.as_deref(), Some("completed"));
+
+    let schedules: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_schedule")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(schedules >= 2, "graded skills have schedule rows");
+
+    let errors: i64 = sqlx::query_scalar(
+        "SELECT count FROM error_patterns WHERE skill_id = ? AND tag = 'sign-error'",
+    )
+    .bind(&hinted.attempt.skill_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(errors, 2);
+
+    let level: i64 = sqlx::query_scalar("SELECT level FROM hint_state WHERE item_id = ?")
+        .bind(&recall_item)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(level, 0);
+    let uses: i64 = sqlx::query_scalar("SELECT uses FROM hint_state WHERE item_id = ?")
+        .bind(&recall_item)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(uses, 2);
+
+    // The duplicate per-run counter is gone; hint_state owns the cursor.
+    let run_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('session_runs')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !run_columns.iter().any(|name| name == "hints_used"),
+        "session_runs must not keep a second hint counter"
+    );
+
+    let events = session::events(&pool, &started.id).await.unwrap();
+    assert!(events.iter().any(|event| event.kind == "hint"));
+    assert!(events.iter().any(|event| event.kind == "attempt"));
+    let snapshot = fsrs::weekly_snapshot(&pool, None).await.unwrap();
+    let attempts: Vec<_> = snapshot
+        .sessions
+        .iter()
+        .filter(|event| event.kind == "attempt")
+        .collect();
+    assert_eq!(attempts.len(), 4);
+    assert!(attempts
+        .iter()
+        .all(|event| event.session_id.as_deref() == Some(started.id.as_str())));
     cleanup(&db);
 }
 

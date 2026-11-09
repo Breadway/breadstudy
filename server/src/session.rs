@@ -19,10 +19,17 @@
 //! from that cache; this module never calls a model. Live explanations
 //! stay outside the session engine.
 //!
+//! Hint progress is not stored on the run. `hint_state` is the single
+//! source of truth: [`hint`] advances it through [`fsrs::next_hint`] and
+//! the rendered view only mirrors the current level. Graded attempts go
+//! through [`grade`], which calls [`fsrs::record_attempt`] so mastery,
+//! due dates and error patterns update from real sessions.
+//!
 //! FSRS due-ness is an optional narrow boundary: [`SessionEngine`]
 //! accepts a `fn(&str) -> Option<f64>` scorer. When the FSRS module is
 //! not present (or returns `None`) items fall back to bank order, so
-//! this module compiles and runs without it.
+//! this module compiles and runs without it. Mastery recording is not
+//! optional because it is the point of a graded attempt.
 //!
 //! An append-only event log (`session_events`) records every phase,
 //! skip, pause, hint and item change. Other modules read it through
@@ -32,6 +39,8 @@ use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
+
+use crate::fsrs;
 
 /// A phase in the session state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +343,14 @@ pub struct SkipOutcome {
     pub grace_used: bool,
 }
 
+/// Result of grading one attempt. The FSRS outcome carries the mastery,
+/// rating and error-pattern evidence the session view reflects.
+#[derive(Debug, Clone, Serialize)]
+pub struct GradeOutcome {
+    pub attempt: fsrs::AttemptOutcome,
+    pub session: SessionView,
+}
+
 #[derive(Debug, Clone)]
 struct BankItem {
     id: String,
@@ -358,7 +375,9 @@ struct Run {
     skip_count: u32,
     grace_tokens: u32,
     item_cursor: i64,
-    hints_used: u32,
+    /// Mirror of `hint_state.level` for the current item, refreshed from
+    /// the database on every load. Never persisted on the run.
+    hint_level: i64,
     content: Vec<CachedItem>,
     started_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -400,18 +419,14 @@ impl Run {
         } else {
             0
         };
+        let hint_level = self.hint_level.max(0) as usize;
         let item = current_cached(self).map(|cached| ItemView {
             id: cached.id.clone(),
             skill_id: cached.skill_id.clone(),
             strand: cached.strand.clone(),
             prompt: cached.prompt.clone(),
             audio_path: cached.audio_path.clone(),
-            hints: cached
-                .hints
-                .iter()
-                .take(self.hints_used as usize)
-                .cloned()
-                .collect(),
+            hints: cached.hints.iter().take(hint_level).cloned().collect(),
             hint_count: cached.hints.len(),
         });
         SessionView {
@@ -426,7 +441,7 @@ impl Run {
             off_task_pauses: self.off_task_pauses,
             skip_count: self.skip_count,
             grace_tokens: self.grace_tokens,
-            hints_used: self.hints_used,
+            hints_used: hint_level as u32,
             item,
             plan: phases,
             started_at: encode_ts(self.started_at),
@@ -464,6 +479,32 @@ fn current_cached(run: &Run) -> Option<&CachedItem> {
         }
     }
     run.content.iter().find(|item| item.phase == run.phase())
+}
+
+/// Read the ladder cursor for the run's current item. `hint_state` owns
+/// this value; the run only mirrors it for rendering.
+async fn hint_level_for(pool: &SqlitePool, run: &Run) -> anyhow::Result<i64> {
+    let Some(item) = current_cached(run) else {
+        return Ok(0);
+    };
+    let level: Option<i64> = sqlx::query_scalar("SELECT level FROM hint_state WHERE item_id = ?")
+        .bind(&item.id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(level.unwrap_or(0).max(0))
+}
+
+/// Replace the cached hint text with the authoritative ladder. The cache
+/// exists so a session does not re-read items mid-run, but `hint_state`
+/// and `items.hints` decide what the rungs actually are.
+async fn sync_cached_ladder(pool: &SqlitePool, run: &mut Run, item_id: &str) -> anyhow::Result<()> {
+    let ladder = fsrs::hint_ladder(pool, item_id).await?;
+    for cached in &mut run.content {
+        if cached.id == item_id {
+            cached.hints = ladder.levels.clone();
+        }
+    }
+    Ok(())
 }
 
 async fn load_bank(pool: &SqlitePool) -> anyhow::Result<Vec<BankItem>> {
@@ -605,7 +646,7 @@ fn row_to_run(row: &sqlx::sqlite::SqliteRow) -> Run {
         skip_count: row.get::<i64, _>("skip_count").max(0) as u32,
         grace_tokens: row.get::<i64, _>("grace_tokens").max(0) as u32,
         item_cursor: row.get("item_cursor"),
-        hints_used: row.get::<i64, _>("hints_used").max(0) as u32,
+        hint_level: 0,
         content,
         started_at: decode_ts(&row.get::<String, _>("started_at")).unwrap_or_else(Utc::now),
         updated_at: decode_ts(&row.get::<String, _>("updated_at")).unwrap_or_else(Utc::now),
@@ -621,13 +662,17 @@ async fn load(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Run>> {
     let row = sqlx::query(
         "SELECT id, template, phase_index, phase_remaining_seconds, paused, paused_at, \
          total_paused_seconds, off_task_pauses, skip_count, grace_tokens, item_cursor, \
-         hints_used, content_json, started_at, updated_at, ended_at, outcome \
+         content_json, started_at, updated_at, ended_at, outcome \
          FROM session_runs WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.as_ref().map(row_to_run))
+    let Some(mut run) = row.as_ref().map(row_to_run) else {
+        return Ok(None);
+    };
+    run.hint_level = hint_level_for(pool, &run).await?;
+    Ok(Some(run))
 }
 
 async fn save(pool: &SqlitePool, run: &Run) -> anyhow::Result<()> {
@@ -635,7 +680,7 @@ async fn save(pool: &SqlitePool, run: &Run) -> anyhow::Result<()> {
         "UPDATE session_runs SET template = ?, phase = ?, phase_index = ?, \
          phase_remaining_seconds = ?, paused = ?, paused_at = ?, total_paused_seconds = ?, \
          off_task_pauses = ?, skip_count = ?, grace_tokens = ?, item_cursor = ?, \
-         hints_used = ?, content_json = ?, updated_at = ?, ended_at = ?, outcome = ? \
+         content_json = ?, updated_at = ?, ended_at = ?, outcome = ? \
          WHERE id = ?",
     )
     .bind(run.template.as_str())
@@ -649,7 +694,6 @@ async fn save(pool: &SqlitePool, run: &Run) -> anyhow::Result<()> {
     .bind(run.skip_count as i64)
     .bind(run.grace_tokens as i64)
     .bind(run.item_cursor)
-    .bind(run.hints_used as i64)
     .bind(serde_json::to_string(&run.content)?)
     .bind(encode_ts(run.updated_at))
     .bind(run.ended_at.map(encode_ts))
@@ -685,6 +729,7 @@ async fn refresh(pool: &SqlitePool, id: &str, now: DateTime<Utc>) -> anyhow::Res
         return Ok(None);
     };
     let changed = apply_elapsed(pool, &mut run, now).await?;
+    run.hint_level = hint_level_for(pool, &run).await?;
     if changed {
         save(pool, &run).await?;
     }
@@ -752,8 +797,8 @@ async fn advance_phase(
     run.phase_index = next_index;
     let next = plan[next_index];
     run.phase_remaining_seconds = next.seconds;
-    run.hints_used = 0;
     run.item_cursor = first_content_index(&run.content, next.phase);
+    run.hint_level = hint_level_for(pool, run).await?;
     let mut detail = serde_json::json!({
         "from": from.phase.as_str(),
         "to": next.phase.as_str(),
@@ -785,12 +830,19 @@ pub async fn start(
         phase_index += 1;
     }
     let bank = load_bank(pool).await?;
-    let content = select_content(options.template, &bank, options.engine);
+    let mut content = select_content(options.template, &bank, options.engine);
+    // The cached rungs mirror items.hints and the hint_state cursor. Sync
+    // once at start so a stale or too-short authored ladder cannot leak a
+    // different ladder than the one FSRS advances.
+    for item in &mut content {
+        let ladder = fsrs::hint_ladder(pool, &item.id).await?;
+        item.hints = ladder.levels;
+    }
     let id = Uuid::new_v4().to_string();
     let phase = plan[phase_index].phase;
     let phase_remaining_seconds = plan[phase_index].seconds;
     let item_cursor = first_content_index(&content, phase);
-    let run = Run {
+    let mut run = Run {
         id,
         template: options.template,
         phase_index,
@@ -802,19 +854,20 @@ pub async fn start(
         skip_count: 0,
         grace_tokens: options.grace_tokens,
         item_cursor,
-        hints_used: 0,
+        hint_level: 0,
         content,
         started_at: now,
         updated_at: now,
         ended_at: None,
         outcome: None,
     };
+    run.hint_level = hint_level_for(pool, &run).await?;
     sqlx::query(
         "INSERT INTO session_runs( \
          id, template, phase, phase_index, phase_remaining_seconds, paused, paused_at, \
          total_paused_seconds, off_task_pauses, skip_count, grace_tokens, item_cursor, \
-         hints_used, content_json, started_at, updated_at, ended_at, outcome \
-         ) VALUES(?,?,?,?,?,0,NULL,0,0,0,?,?,0,?,?,?,NULL,NULL)",
+         content_json, started_at, updated_at, ended_at, outcome \
+         ) VALUES(?,?,?,?,?,0,NULL,0,0,0,?,?,?,?,?,NULL,NULL)",
     )
     .bind(&run.id)
     .bind(run.template.as_str())
@@ -1002,7 +1055,9 @@ pub async fn skip(
     }))
 }
 
-/// Unlock the next cached hint for the current item.
+/// Unlock the next rung of the current item's ladder. The cursor lives in
+/// `hint_state`; this function advances it through [`fsrs::next_hint`] and
+/// keeps a session event so the review can see hint use in context.
 pub async fn hint(
     pool: &SqlitePool,
     id: &str,
@@ -1011,30 +1066,38 @@ pub async fn hint(
     let Some(mut run) = refresh(pool, id, now).await? else {
         return Ok(None);
     };
-    let item = current_cached(&run).cloned();
-    let hint = item
-        .as_ref()
-        .and_then(|item| item.hints.get(run.hints_used as usize).cloned());
-    if let (Some(hint), Some(item)) = (hint.as_ref(), item.as_ref()) {
-        run.hints_used = run.hints_used.saturating_add(1);
+    let Some(item_id) = current_cached(&run).map(|item| item.id.clone()) else {
+        return Ok(Some(HintOutcome {
+            hint: None,
+            hints_used: 0,
+            session: run.view(now),
+        }));
+    };
+    let reveal = fsrs::next_hint(pool, &item_id).await?;
+    if let Some(reveal) = reveal.as_ref() {
+        // The authoritative ladder may have been authored or repaired on
+        // first use; refresh the cached rungs so the view matches it.
+        sync_cached_ladder(pool, &mut run, &item_id).await?;
         log_event(
             pool,
             &run,
             now,
             "hint",
             serde_json::json!({
-                "item_id": item.id,
-                "hints_used": run.hints_used,
-                "hint": hint,
+                "item_id": item_id,
+                "level": reveal.level,
+                "total": reveal.total,
+                "final_level": reveal.final_level,
             }),
         )
         .await?;
         run.updated_at = now;
         save(pool, &run).await?;
     }
+    run.hint_level = hint_level_for(pool, &run).await?;
     Ok(Some(HintOutcome {
-        hint,
-        hints_used: run.hints_used,
+        hint: reveal.map(|reveal| reveal.text),
+        hints_used: run.hint_level.max(0) as u32,
         session: run.view(now),
     }))
 }
@@ -1059,7 +1122,7 @@ pub async fn next_item(
         .map(|(index, item)| (index, item.id.clone()));
     if let Some((index, item_id)) = found {
         run.item_cursor = index as i64;
-        run.hints_used = 0;
+        run.hint_level = hint_level_for(pool, &run).await?;
         log_event(
             pool,
             &run,
@@ -1072,6 +1135,59 @@ pub async fn next_item(
         save(pool, &run).await?;
     }
     Ok(Some(run.view(now)))
+}
+
+/// Grade one attempt from this session and record it through FSRS.
+///
+/// The session id is attached here, not trusted from the caller, so the
+/// weekly review can tie the attempt, hint and intervention rows back to
+/// the run. Hint use is read from `hint_state` by
+/// [`fsrs::record_attempt`]; this module does not keep a parallel count.
+/// The session event log still records the attempt for [`events`] and
+/// [`weekly_skip_count`] readers.
+pub async fn grade(
+    pool: &SqlitePool,
+    id: &str,
+    mut input: fsrs::AttemptInput,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<GradeOutcome>> {
+    let Some(mut run) = refresh(pool, id, now).await? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        run.content.iter().any(|item| item.id == input.item_id),
+        "item {} is not part of session {}",
+        input.item_id,
+        run.id
+    );
+    input.session_id = Some(run.id.clone());
+    let attempt = fsrs::record_attempt(pool, &input).await?;
+    log_event(
+        pool,
+        &run,
+        now,
+        "attempt",
+        serde_json::json!({
+            "item_id": &input.item_id,
+            "skill_id": &attempt.skill_id,
+            "correct": attempt.correct,
+            "rating": attempt.rating,
+            "hints_used": attempt.hints_used,
+            "mastery_before": attempt.mastery_before,
+            "mastery_after": attempt.mastery_after,
+            "error_tags": &input.error_tags,
+            "repeated_errors": &attempt.repeated_errors,
+        }),
+    )
+    .await?;
+    // record_attempt resets the ladder for the next rep.
+    run.hint_level = hint_level_for(pool, &run).await?;
+    run.updated_at = now;
+    save(pool, &run).await?;
+    Ok(Some(GradeOutcome {
+        attempt,
+        session: run.view(now),
+    }))
 }
 
 /// Read the append-only event log for a session. This is the public
