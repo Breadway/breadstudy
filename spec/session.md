@@ -1,20 +1,34 @@
-# Session state machine
+# Session rules
 
-prime -> recall -> practice -> explain -> reflect -> break -> end
+Server-owned state machine. `prime -> recall -> practice -> explain -> reflect -> break -> end`.
 
-## 20 min school day
+## Templates
 
-- 0-2 recall: two due items, spoken
-- 2-12 practice: two or three problems, hint ladder
-- 12-17 explain: talk through the method, agent checks and fills gaps
-- 17-20 capture: error tags, one vault note, next session booked
+- **School day, 20 min:** recall 120s, practice 600s, explain 300s, reflect 180s. Prime and break are zero-duration and hidden.
+- **Weekend, 40 min:** prime 180s, recall 180s, practice 720s, break 240s (18:00-22:00), explain 900s in a different strand, reflect 180s.
 
-## 40 min weekend
+## Content
 
-- 0-3 warm-up, 3-18 block A, 18-22 break with optional puzzle, 22-37 block B in a different strand, 37-40 reflection and write-back
+- Items, hints and audio paths are resolved at session start and served from the cached run. No model call happens mid-session except the teaching board.
+- The bank is filtered to `verified` items, ordered by FSRS due score, then not-served-in-7-days, then least recently served.
+- The session view reports `cached_items_total`, `cached_items_remaining` and per-phase counts.
 
-## Rules
+## Controls
 
-- Items, hints, and audio come from cache. Only live explanations hit a model.
-- Off-task over 60s pauses the timer with a nudge. Nothing is blocked.
-- Skip logs a reason, re-plans, shows weekly skip count. Grace tokens apply.
+- **Next question** pulls the next cached item in the phase.
+- **Advance** moves to the next phase and is refused while the phase still has cached items.
+- **Skip** requires a reason, consumes the current item, stays in phase, and counts against weekly skips and grace tokens.
+- **Hint** unlocks the next rung of the item's ladder. Progress is keyed by `(session_id, item_id)` and starts at zero.
+- **Off-task** at 60 seconds pauses the timer and returns a nudge; resume continues from the remaining time.
+
+## Grading
+
+- `POST /api/attempts` grades one item and records the attempt; with `session_id` it also writes FSRS state.
+- `POST /api/session/{id}/grade-parts` grades a multi-part item and totals the marks.
+- Method marks require working text; a bare final answer earns only the final mark.
+- A deterministic numeric check overrides the model when both answers are comparable.
+
+## Teaching
+
+- `POST /api/teach` takes a question, optional `item_id` and a short transcript, and returns ordered blocks: prose, LaTeX, steps and one sanitized SVG.
+- The client reveals and speaks blocks in order and can interrupt at any time.

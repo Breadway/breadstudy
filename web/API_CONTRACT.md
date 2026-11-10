@@ -1,38 +1,51 @@
-# STUDY-19 API contract notes
+# breadstudy API
 
-The PWA builds against the stub already on main plus the shapes in
-`spec/session.md` and `spec/skills.md`. It does not edit `server/`.
+Base URL: the deployed origin. All bodies are JSON unless stated.
 
-## What main provides now
+## Health and catalog
 
-- `GET /healthz` returns `ok`.
-- `GET /api/skills` returns the string `[]` with a text body (axum `&str`
-  handler). The PWA fetches it as text and parses JSON, so `[]` still works,
-  but the content type is not JSON.
+- `GET /healthz` -> `ok`
+- `GET /api/skills` -> `[{ id, strand, name, vault_note }]`
+- `GET /api/skills/{id}` -> skill detail: `name`, `strand`, `vault_note`, `vault_note_path`, `summary`, `item_count`, `note_excerpts`, `sample_items` (answers and hints omitted).
 
-## What the PWA expects (for server-core reconciliation)
+## Planning
 
-- `GET /api/skills` returns JSON array:
-  `[{ id, strand, name, vault_note }]`
-  with `content-type: application/json`. Example ids come from
-  `spec/skills.md`: `volume-prism-cylinder`, `volume-cone-pyramid-sphere`,
-  `surface-area`, `unit-conversion-scaling`, `measurement-error`,
-  `pythagoras-3d`.
-- Future dashboard endpoints (not required for STUDY-19, PWA degrades to
-  local sample data when they 404):
-  - `GET /api/dashboard` with today, streak, weak spots, upcoming
-    assessments, history.
-  - `GET /api/session/next` with cached item, hints, and audio URLs.
-  - `POST /api/attempts` with method marks, final mark, and error tags.
-- Session phases follow `spec/session.md`:
-  `prime -> recall -> practice -> explain -> reflect -> break -> end`.
-  The client owns the countdown display; the server remains the authority
-  for phase transitions and timer expiry once the session engine lands.
+- `GET /api/plan` -> plan rows (read-only; no writes).
+- `POST /api/plan` -> creates and logs a plan.
+- `GET /api/plan/due` -> `[{ skill_id, name, mastery, due_at, due_score, reviews, lapses }]`.
+- `GET /api/weekly/snapshot` -> weekly aggregate.
+- `GET /api/progress?limit=N` -> `recent_attempts`, `skills` (mastery, accuracy, due), `error_patterns`, `attempts_total`. Limit capped at 200.
 
-## Mismatches to reconcile (server-core owns `server/`)
+## Sessions
 
-1. `/api/skills` should return `Json<Vec<Skill>>` instead of `&str`.
-2. Dashboard, session, and attempt endpoints do not exist yet. PWA uses
-   `localStorage` samples and must be re-pointed once they land.
-3. No static file serving for `web/` yet. Deploy must serve `web/` at the
-   PWA root or the service worker scope breaks.
+- `POST /api/session` `{ template?: "school_day_20" | "weekend_40", skill_id?, grace_tokens? }` -> `SessionView` (201).
+- `GET /api/session/{id}` -> `SessionView`, or 404.
+- `POST /api/session/{id}/tick`
+- `POST /api/session/{id}/advance`
+- `POST /api/session/{id}/next-item`
+- `POST /api/session/{id}/hint` -> `{ hint, hints_used, session }`
+- `POST /api/session/{id}/skip` `{ reason }`
+- `POST /api/session/{id}/off-task` `{ seconds }`
+- `POST /api/session/{id}/resume`
+- `POST /api/session/{id}/grade-parts` -> per-part marks and total.
+- `GET /api/skips/weekly` -> `{ weekly_skip_count }`
+
+`SessionView` carries `phase`, `phase_index`, `phase_remaining_seconds`, `total_remaining_seconds`, `item` (id, skill, strand, prompt, hints, `hint_unlocked`, `hint_count`), `plan`, `cached_items_total`, `cached_items_remaining`, `hints_used`, `skip_count`, `grace_tokens`.
+
+## Attempts and grading
+
+- `POST /api/attempts`
+  `{ item_id, input_kind: "latex" | "photo" | "transcript", latex?, transcript?, photo_base64?, photo_media_type?, session_id?, confirmed?, confirmed_text? }`
+  -> `{ status: "graded", attempt }` or `{ status: "needs_confirmation", transcription, confidence }`.
+- Request bodies are capped at 8 MB; larger returns 413 with a JSON message.
+
+## Teaching
+
+- `POST /api/teach` `{ question, item_id?, history?: [{ role, content }] }` ->
+  `{ blocks: [{ kind: "text" | "latex" | "steps" | "svg", ... }] }`.
+  SVG is sanitized server-side; blocks are length-capped.
+
+## Notes for clients
+
+- Static files are served from the web directory. Extensionless unknown paths fall back to the app shell; missing assets return 404.
+- Errors are JSON: `{ "error": "..." }` with a 4xx or 5xx status.
