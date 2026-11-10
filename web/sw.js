@@ -54,6 +54,22 @@ self.addEventListener("fetch", (event) => {
     );
     return;
   }
+
+  // Code and pages are network-first: a cache-first shell keeps serving old
+  // JavaScript after a deploy, which makes new server blocks look unsupported.
+  const code = /\.(?:html|js|css|webmanifest)$/.test(url.pathname) || url.pathname === "/";
+  if (code) {
+    event.respondWith(
+      fetch(event.request).then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+        return res;
+      }).catch(() => caches.match(event.request).then((hit) => hit || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  // Icons, fonts and images stay cache-first.
   event.respondWith(
     caches.match(event.request, { ignoreSearch: true }).then((hit) => {
       return hit || fetch(event.request).then((res) => {

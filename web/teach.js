@@ -1772,7 +1772,14 @@
   };
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
+    if ("serviceWorker" in navigator) {
+    navigator.serviceWorker
+      .register("./sw.js", { updateViaCache: "none" })
+      .then((registration) => registration.update())
+      .catch(() => {});
+  }
+
+  document.addEventListener("DOMContentLoaded", init);
   } else {
     init();
   }
