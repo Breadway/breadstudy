@@ -212,6 +212,10 @@ pub struct AttemptInput {
     pub session_id: Option<String>,
     #[serde(default)]
     pub error_tags: Vec<String>,
+    /// When the caller already persisted a rich attempt row (the grading
+    /// service does), update that row instead of inserting a second one.
+    #[serde(default)]
+    pub attempt_id: Option<String>,
 }
 
 /// Everything the caller needs after grading one attempt.
@@ -635,23 +639,35 @@ pub async fn record_attempt_at(
     .execute(&mut *tx)
     .await?;
 
-    let attempt_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO attempts
-           (id, item_id, input_kind, given, correct, error_tags, hints_used, rating, created_at)
-         VALUES(?,?,?,?,?,?,?,?,?)",
-    )
-    .bind(&attempt_id)
-    .bind(&input.item_id)
-    .bind(&input.input_kind)
-    .bind(&input.given)
-    .bind(input.correct)
-    .bind(serde_json::to_string(&input.error_tags)?)
-    .bind(i64::from(hints_used))
-    .bind(i64::from(rating.level()))
-    .bind(iso(now))
-    .execute(&mut *tx)
-    .await?;
+    let attempt_id = input
+        .attempt_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if input.attempt_id.is_some() {
+        sqlx::query("UPDATE attempts SET hints_used = ?, rating = ? WHERE id = ?")
+            .bind(i64::from(hints_used))
+            .bind(i64::from(rating.level()))
+            .bind(&attempt_id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO attempts
+               (id, item_id, input_kind, given, correct, error_tags, hints_used, rating, created_at)
+             VALUES(?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(&attempt_id)
+        .bind(&input.item_id)
+        .bind(&input.input_kind)
+        .bind(&input.given)
+        .bind(input.correct)
+        .bind(serde_json::to_string(&input.error_tags)?)
+        .bind(i64::from(hints_used))
+        .bind(i64::from(rating.level()))
+        .bind(iso(now))
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // The ladder resets for the next rep; this attempt keeps its count.
     sqlx::query("UPDATE hint_state SET level = 0, updated_at = ? WHERE item_id = ?")

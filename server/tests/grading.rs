@@ -158,6 +158,7 @@ fn photo_request() -> AttemptRequest {
         photo_media_type: Some("image/jpeg".into()),
         confirmed_text: None,
         confirmed: false,
+        session_id: None,
     }
 }
 
@@ -208,6 +209,63 @@ async fn photo_grades_with_method_and_final_marks() {
     assert_eq!(requests[0].input_kind, InputKind::Photo);
     assert!(requests[0].has_photo);
     assert_eq!(requests[0].rubric_ids, vec!["formula", "substitution"]);
+
+    drop(pool);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
+async fn graded_attempt_records_fsrs_and_moves_the_due_plan() {
+    let (db, pool) = setup("fsrs").await;
+    let grader = Arc::new(FakeGrader::new(vec![Ok(full_marks_response())]));
+    let service = GradingService::new(grader, 0.75);
+    let request = AttemptRequest {
+        session_id: Some("sess-graded".into()),
+        ..photo_request()
+    };
+
+    let outcome = service.grade(&pool, request).await.unwrap();
+    let GradeOutcome::Graded { attempt } = outcome else {
+        panic!("expected a graded attempt");
+    };
+
+    // The rich grading row is the one FSRS updated, not a duplicate.
+    assert_eq!(attempt_count(&pool).await, 1);
+    let (rating, hints, correct): (Option<i64>, i64, i64) =
+        sqlx::query_as("SELECT rating, hints_used, correct FROM attempts WHERE id = ?")
+            .bind(&attempt.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(rating.is_some(), "FSRS rating is stored on the attempt");
+    assert_eq!(hints, 0);
+    assert_eq!(correct, 1);
+
+    let (mastery, reviews, due_at): (f64, i64, String) = sqlx::query_as(
+        "SELECT mastery, reviews, due_at FROM skill_schedule WHERE skill_id = 'volume-prism-cylinder'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(reviews >= 1);
+    assert!(mastery > 0.4, "a clean success lifts mastery: {mastery}");
+    assert!(!due_at.is_empty());
+
+    let plan = breadstudy_server::fsrs::due_skills(&pool).await.unwrap();
+    let row = plan
+        .iter()
+        .find(|skill| skill.skill_id == "volume-prism-cylinder")
+        .unwrap();
+    assert!((row.mastery - mastery).abs() < 1e-9);
+    assert!(row.due_at.is_some());
+    assert_eq!(row.reviews, reviews);
+
+    let logged_session: Option<String> =
+        sqlx::query_scalar("SELECT session_id FROM session_log WHERE kind = 'attempt'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(logged_session.as_deref(), Some("sess-graded"));
 
     drop(pool);
     let _ = std::fs::remove_file(&db);
@@ -293,6 +351,7 @@ async fn low_confidence_photo_asks_for_confirmation_and_records_nothing() {
         photo_base64: None,
         confirmed_text: Some("V = pi r^2 h = pi * 3^2 * 7 = 63pi ≈ 197.9 cm^3".into()),
         confirmed: true,
+        session_id: None,
         ..photo_request()
     };
     let outcome = service.grade(&pool, confirmed).await.unwrap();
@@ -362,6 +421,7 @@ async fn transcript_low_confidence_asks_then_grades_confirmed_text() {
         photo_media_type: None,
         confirmed_text: None,
         confirmed: false,
+        session_id: None,
     };
     match service.grade(&pool, request.clone()).await.unwrap() {
         GradeOutcome::NeedsConfirmation { input_kind, .. } => {
@@ -400,6 +460,7 @@ async fn typed_latex_grades_without_a_photo() {
         photo_media_type: None,
         confirmed_text: None,
         confirmed: false,
+        session_id: None,
     };
     let outcome = service.grade(&pool, request).await.unwrap();
     let GradeOutcome::Graded { attempt } = outcome else {

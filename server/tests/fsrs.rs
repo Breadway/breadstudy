@@ -62,6 +62,7 @@ fn attempt(item_id: &str, correct: bool, tags: &[&str]) -> AttemptInput {
         correct,
         session_id: Some("sess-test".into()),
         error_tags: tags.iter().map(|tag| tag.to_string()).collect(),
+        attempt_id: None,
     }
 }
 

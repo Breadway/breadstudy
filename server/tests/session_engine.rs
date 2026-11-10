@@ -388,6 +388,7 @@ async fn graded_session_updates_fsrs_and_hint_state_is_the_only_counter() {
             correct: true,
             session_id: None,
             error_tags: vec![],
+            attempt_id: None,
         },
         t0(),
     )
@@ -425,6 +426,7 @@ async fn graded_session_updates_fsrs_and_hint_state_is_the_only_counter() {
             correct: true,
             session_id: None,
             error_tags: vec![],
+            attempt_id: None,
         },
         t0(),
     )
@@ -451,6 +453,7 @@ async fn graded_session_updates_fsrs_and_hint_state_is_the_only_counter() {
                 correct: false,
                 session_id: None,
                 error_tags: vec!["sign-error".into()],
+                attempt_id: None,
             },
             t0(),
         )
