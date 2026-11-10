@@ -132,6 +132,9 @@ function applyServerView(view) {
     sessionState.hintTotal = 0;
   }
   sessionState.hintsUsed = sessionState.hintsUnlocked;
+  if (!sessionState.item || !previous || previous.id !== sessionState.item.id) {
+    resetAttemptState();
+  }
   persistSessionId(view.id);
   renderPhases("phase-row");
   renderTimer();
@@ -359,6 +362,126 @@ function renderGrade(attempt) {
   }
 }
 
+let pendingPhoto = null;
+let lastAnswerText = "";
+
+function setSubmitLabel(label) {
+  const btn = document.getElementById("submit-btn");
+  if (btn) btn.textContent = label;
+}
+
+function photoTargetSize(width, height, maxEdge) {
+  const edge = maxEdge || 1600;
+  const longest = Math.max(width || 0, height || 0);
+  if (!longest) return { width: 0, height: 0 };
+  const scale = Math.min(1, edge / longest);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale))
+  };
+}
+
+function loadPhotoBitmap(file) {
+  if (window.createImageBitmap) {
+    return window.createImageBitmap(file).catch(() => loadPhotoImage(file));
+  }
+  return loadPhotoImage(file);
+}
+
+function loadPhotoImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("could not decode the photo"));
+    };
+    img.src = url;
+  });
+}
+
+function canvasToJpeg(canvas, quality) {
+  return new Promise((resolve) => {
+    if (canvas.toBlob) {
+      canvas.toBlob((blob) => resolve(blob), "image/jpeg", quality);
+      return;
+    }
+    try {
+      const data = canvas.toDataURL("image/jpeg", quality);
+      const raw = atob(data.split(",")[1] || "");
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+      resolve(new Blob([bytes], { type: "image/jpeg" }));
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+// Resize a phone photo to under 1 MB before upload. The long edge starts at
+// 1600px and JPEG quality at 0.8; both step down until the blob fits.
+async function resizePhoto(file, maxBytes) {
+  const limit = maxBytes || 1000000;
+  if (!file || !String(file.type || "").startsWith("image/")) {
+    return { blob: file, mediaType: (file && file.type) || "image/jpeg", resized: false, error: "not an image" };
+  }
+  try {
+    const bitmap = await loadPhotoBitmap(file);
+    let width = bitmap.width || bitmap.naturalWidth;
+    let height = bitmap.height || bitmap.naturalHeight;
+    let size = photoTargetSize(width, height, 1600);
+    let blob = null;
+    for (let scalePass = 0; scalePass < 4; scalePass += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = size.width;
+      canvas.height = size.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("canvas unavailable");
+      ctx.drawImage(bitmap, 0, 0, size.width, size.height);
+      for (let quality = 0.8; quality >= 0.5; quality -= 0.1) {
+        blob = await canvasToJpeg(canvas, quality);
+        if (blob && blob.size <= limit) break;
+      }
+      if (blob && blob.size <= limit) break;
+      size = {
+        width: Math.max(1, Math.round(size.width * 0.75)),
+        height: Math.max(1, Math.round(size.height * 0.75))
+      };
+    }
+    if (!blob) throw new Error("canvas produced no image");
+    return { blob, mediaType: "image/jpeg", resized: true, width: size.width, height: size.height };
+  } catch (e) {
+    return {
+      blob: file,
+      mediaType: file.type || "image/jpeg",
+      resized: false,
+      error: String(e && e.message ? e.message : e)
+    };
+  }
+}
+
+function refreshAnswerPreview() {
+  const latex = document.getElementById("latex-answer");
+  const preview = document.getElementById("latex-preview");
+  if (!latex || !preview) return;
+  const raw = latex.value.trim();
+  if (window.BreadstudyScratch && raw) {
+    window.BreadstudyScratch.previewInto("latex-preview", raw);
+  } else {
+    preview.textContent = raw ? "Typed answer: " + raw : "Typed answer preview appears here.";
+  }
+}
+
+function resetAttemptState() {
+  pendingPhoto = null;
+  lastAnswerText = "";
+  setSubmitLabel("Submit answer");
+}
+
 async function submitAnswer() {
   const status = document.getElementById("grade-feedback");
   const item = sessionState.item;
@@ -372,7 +495,7 @@ async function submitAnswer() {
   const photoInput = document.getElementById("photo-input");
   const file = photoInput && photoInput.files && photoInput.files[0];
 
-  if (!latex && !file) {
+  if (!latex && !file && !pendingPhoto) {
     if (status) status.textContent = "Type an answer or attach a photo first.";
     return;
   }
@@ -383,30 +506,74 @@ async function submitAnswer() {
 
   try {
     let payload;
-    if (file) {
+    if (pendingPhoto) {
       payload = {
         item_id: item.id,
         input_kind: "photo",
-        photo_base64: await fileToBase64(file),
-        photo_media_type: file.type || "image/jpeg"
+        photo_base64: pendingPhoto.base64,
+        photo_media_type: pendingPhoto.mediaType,
+        confirmed: true,
+        confirmed_text: latex || pendingPhoto.transcription
       };
+    } else if (file) {
+      const resized = await resizePhoto(file);
+      const photoStatus = document.getElementById("photo-status");
+      if (resized.resized) {
+        if (photoStatus) {
+          photoStatus.textContent =
+            "Photo resized to " + Math.round(resized.blob.size / 1024) + " KB (" +
+            resized.width + "x" + resized.height + "). The original stays on the device.";
+        }
+      } else if (photoStatus) {
+        photoStatus.textContent = "Could not resize this photo; sending it as-is (" +
+          Math.round(file.size / 1024) + " KB).";
+      }
+      payload = {
+        item_id: item.id,
+        input_kind: "photo",
+        photo_base64: await fileToBase64(resized.blob),
+        photo_media_type: resized.mediaType
+      };
+      lastAnswerText = "";
     } else {
       payload = { item_id: item.id, input_kind: "latex", latex };
+      lastAnswerText = latex;
     }
 
     const reply = await postJson("/api/attempts", payload);
+
     if (reply.status === "needs_confirmation") {
+      const transcription = reply.transcription || "";
+      if (payload.input_kind === "photo" && payload.photo_base64) {
+        pendingPhoto = {
+          base64: payload.photo_base64,
+          mediaType: payload.photo_media_type || "image/jpeg",
+          transcription
+        };
+      }
+      if (latexEl) latexEl.value = transcription;
+      refreshAnswerPreview();
+      setSubmitLabel("Confirm and mark");
       if (status) {
         status.textContent =
-          'I read "' + reply.transcription + '" at ' + Math.round((reply.confidence || 0) * 100) +
-          "% confidence. Fix the answer box if that is wrong, then submit again to confirm.";
+          'I read "' + transcription + '" at ' + Math.round((reply.confidence || 0) * 100) +
+          "% confidence. Fix the transcription in the answer box if needed, then press Confirm and mark.";
       }
+      if (photoInput) photoInput.value = "";
       return;
     }
+
+    pendingPhoto = null;
+    setSubmitLabel("Submit answer");
+    lastAnswerText = (reply.attempt && reply.attempt.given) || latex;
+    if (latexEl && payload.input_kind === "latex") latexEl.value = "";
     renderGrade(reply.attempt);
     logLocal("graded", { item: item.id, correct: reply.attempt.correct });
   } catch (e) {
-    if (status) status.textContent = "Could not mark that: " + e.message;
+    if (status) {
+      status.textContent = "Could not mark that: " + e.message +
+        (pendingPhoto ? " The photo is still attached, so you can retry." : "");
+    }
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -574,16 +741,7 @@ function logLocal(kind, payload) {
 
 function bindAnswerInputs() {
   const latex = document.getElementById("latex-answer");
-  const preview = document.getElementById("latex-preview");
-  if (latex && preview) {
-    latex.addEventListener("input", () => {
-      const raw = latex.value.trim();
-      preview.textContent = raw ? "LaTeX: " + raw : "Typed answer preview appears here.";
-      if (window.BreadstudyScratch && raw) {
-        window.BreadstudyScratch.previewInto("latex-preview", raw);
-      }
-    });
-  }
+  if (latex) latex.addEventListener("input", refreshAnswerPreview);
   const voiceBtn = document.getElementById("voice-btn");
   const voiceStatus = document.getElementById("voice-status");
   if (voiceBtn) {
@@ -607,9 +765,11 @@ function bindAnswerInputs() {
   const photoStatus = document.getElementById("photo-status");
   if (photo) {
     photo.addEventListener("change", () => {
+      pendingPhoto = null;
+      setSubmitLabel("Submit answer");
       if (photo.files && photo.files.length > 0) {
-        if (photoStatus) photoStatus.textContent = "Photo attached: " + photo.files[0].name;
-        logLocal("photo-input", { name: photo.files[0].name });
+        if (photoStatus) photoStatus.textContent = "Photo attached: " + photo.files[0].name + ". It will be resized before upload.";
+        logLocal("photo-input", { name: photo.files[0].name, bytes: photo.files[0].size });
       }
     });
   }
@@ -724,4 +884,14 @@ document.addEventListener("DOMContentLoaded", () => {
   restoreSession();
 });
 
-window.BreadstudySession = { advancePhase, useHint, fetchSkills, SAMPLE_ITEM, restoreSession, persistSessionId };
+window.BreadstudySession = {
+  advancePhase,
+  useHint,
+  fetchSkills,
+  SAMPLE_ITEM,
+  restoreSession,
+  persistSessionId,
+  submitAnswer,
+  resizePhoto,
+  photoTargetSize
+};
