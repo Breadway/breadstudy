@@ -84,6 +84,8 @@ def chat(prompt: str, key: str) -> dict:
         headers={
             "authorization": "Bearer " + key,
             "content-type": "application/json",
+            "accept": "application/json",
+            "user-agent": "breadstudy/0.1",
             "x-opencode-session": SESSION,
         },
     )
