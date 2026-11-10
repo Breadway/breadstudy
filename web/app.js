@@ -17,7 +17,10 @@ let sessionState = {
   item: null,
   sessionId: null,
   serverMode: false,
-  phaseExhausted: false
+  phaseExhausted: false,
+  idle: true,
+  pollId: null,
+  syncInFlight: false
 };
 
 function readStoredSessionId() {
@@ -99,6 +102,7 @@ async function fetchSkills() {
 const PHASE_INDEX = { prime: 0, recall: 1, practice: 2, explain: 3, reflect: 4, break: 5, end: 6 };
 
 function applyServerView(view) {
+  sessionState.idle = false;
   sessionState.sessionId = view.id;
   sessionState.serverMode = true;
   const index = typeof view.phase_index === "number" ? view.phase_index : PHASE_INDEX[view.phase];
@@ -165,7 +169,15 @@ function applyServerView(view) {
   const nextQuestion = document.getElementById("next-question-btn");
   if (nextQuestion) nextQuestion.disabled = finished || !sessionState.item || Boolean(explainItem);
   setStartState(!finished);
-  if (finished) persistSessionId(null);
+  if (finished) {
+    stopTimer();
+    stopPolling();
+    persistSessionId(null);
+    setSessionStatus("Session finished.");
+  } else {
+    startPolling();
+    if (!sessionState.timerId) startTimer();
+  }
 }
 
 function renderItem() {
@@ -189,11 +201,12 @@ function renderItem() {
 }
 
 async function startSession() {
-  if (sessionState.sessionId) {
+  if (sessionState.sessionId && currentPhase() !== "end") {
     setSessionStatus("A session is already running. Finish or end it before starting another.");
     setStartState(true);
     return;
   }
+  sessionState.idle = false;
   try {
     const view = await postJson("/api/session", { template: "school_day_20" });
     applyServerView(view);
@@ -218,7 +231,10 @@ async function startSession() {
 
 async function restoreSession() {
   const stored = urlSessionId() || readStoredSessionId();
-  if (!stored) return false;
+  if (!stored) {
+    setIdleState();
+    return false;
+  }
   try {
     const res = await fetch("/api/session/" + encodeURIComponent(stored), {
       headers: { accept: "application/json" }
@@ -228,13 +244,16 @@ async function restoreSession() {
     applyServerView(view);
     if (view.phase !== "end" && !view.ended_at) {
       startTimer();
+      startPolling();
       setSessionStatus("Restored the running session.");
     } else {
       stopTimer();
+      stopPolling();
       setSessionStatus("The stored session has finished.");
     }
     return true;
   } catch (e) {
+    setIdleState();
     persistSessionId(null);
     setStartState(false);
     setSessionStatus("The stored session is no longer on the server. Press Start for a fresh one.");
@@ -639,13 +658,17 @@ function renderPhases(rootId) {
   const root = document.getElementById(rootId);
   if (!root) return;
   root.innerHTML = "";
+  const label = document.getElementById("phase-label");
+  if (sessionState.idle) {
+    if (label) label.textContent = "Ready to start";
+    return;
+  }
   PHASES.forEach((p, i) => {
     const el = document.createElement("span");
     el.className = "phase" + (i === sessionState.phaseIndex ? " active" : i < sessionState.phaseIndex ? " done" : "");
     el.textContent = p;
     root.appendChild(el);
   });
-  const label = document.getElementById("phase-label");
   if (label) label.textContent = "Phase: " + currentPhase();
 }
 
@@ -657,24 +680,79 @@ function fmtClock(totalSeconds) {
 
 function renderTimer() {
   const el = document.getElementById("session-timer");
-  if (el) el.textContent = fmtClock(Math.max(0, sessionState.remaining));
+  if (!el) return;
+  el.textContent = sessionState.idle ? "--:--" : fmtClock(Math.max(0, sessionState.remaining));
 }
 
 function startTimer() {
   stopTimer();
+  if (sessionState.idle) return;
   sessionState.timerId = setInterval(() => {
     if (sessionState.remaining > 0) {
       sessionState.remaining -= 1;
       renderTimer();
-    } else {
-      advancePhase();
+      return;
     }
+    // The server owns phase transitions. At zero, mirror it once instead of
+    // calling /advance every second.
+    stopTimer();
+    renderTimer();
+    syncSession();
   }, 1000);
 }
 
 function stopTimer() {
   if (sessionState.timerId) clearInterval(sessionState.timerId);
   sessionState.timerId = null;
+}
+
+function startPolling() {
+  if (sessionState.pollId || sessionState.idle) return;
+  sessionState.pollId = setInterval(syncSession, 12000);
+}
+
+function stopPolling() {
+  if (sessionState.pollId) clearInterval(sessionState.pollId);
+  sessionState.pollId = null;
+}
+
+async function syncSession() {
+  if (!sessionState.serverMode || !sessionState.sessionId || sessionState.syncInFlight) return;
+  sessionState.syncInFlight = true;
+  try {
+    const res = await fetch("/api/session/" + encodeURIComponent(sessionState.sessionId), {
+      headers: { accept: "application/json" }
+    });
+    if (!res.ok) throw new Error("session " + sessionState.sessionId + " -> " + res.status);
+    const view = await res.json();
+    applyServerView(view);
+  } catch (e) {
+    logLocal("sync-failed", { error: String(e) });
+  } finally {
+    sessionState.syncInFlight = false;
+  }
+}
+
+function setIdleState() {
+  stopTimer();
+  stopPolling();
+  sessionState.idle = true;
+  sessionState.serverMode = false;
+  sessionState.sessionId = null;
+  sessionState.item = null;
+  sessionState.remaining = 0;
+  sessionState.hintsUnlocked = 0;
+  sessionState.hintTotal = 0;
+  sessionState.hintsUsed = 0;
+  sessionState.phaseExhausted = false;
+  renderPhases("phase-row");
+  renderTimer();
+  renderHints();
+  renderItem();
+  setStartState(false);
+  const nextQuestion = document.getElementById("next-question-btn");
+  if (nextQuestion) nextQuestion.disabled = true;
+  setSessionStatus("Ready when you are. Start a 20 minute school-day session.");
 }
 
 async function nextQuestion() {
@@ -718,6 +796,14 @@ async function nextQuestion() {
 const CONTENT_PHASES = new Set(["recall", "practice", "explain"]);
 
 async function advancePhase() {
+  if (sessionState.idle) {
+    setSessionStatus("Start a session before moving phases.");
+    return;
+  }
+  if (currentPhase() === "end") {
+    setSessionStatus("The session has ended. Advancing is a no-op.");
+    return;
+  }
   if (sessionState.serverMode && sessionState.sessionId) {
     if (currentPhase() === "end") {
       setSessionStatus("The session has ended.");
@@ -766,6 +852,11 @@ function renderHints() {
   const item = sessionState.item || (sessionState.sessionId ? null : SAMPLE_ITEM);
   const btn = document.getElementById("hint-btn");
   const meta = document.getElementById("hint-meta");
+  if (sessionState.idle) {
+    if (meta) meta.textContent = "Start a session to load the hint ladder.";
+    if (btn) btn.disabled = true;
+    return;
+  }
   if (!item) {
     if (meta) meta.textContent = "Start a session to load the hint ladder.";
     if (btn) btn.disabled = true;
@@ -1008,5 +1099,7 @@ window.BreadstudySession = {
   submitAnswer,
   resizePhoto,
   photoTargetSize,
-  nextQuestion
+  nextQuestion,
+  syncSession,
+  setIdleState
 };
