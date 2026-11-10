@@ -76,7 +76,14 @@ button, .btn {
   color: var(--ink);
   font-size: 1rem;
 }
-button.primary { background: var(--accent); color: #141210; border-color: var(--accent); font-weight: 700; }
+button.primary, .btn.primary {
+  background: var(--accent);
+  color: #141210;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+a.btn.primary { display: inline-flex; align-items: center; justify-content: center; }
+.btn.primary[aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
 button:disabled { opacity: 0.5; }
 .hint-list { display: grid; gap: 8px; margin: 8px 0; }
 .hint { border: 1px dashed var(--line); border-radius: 8px; padding: 10px; }
