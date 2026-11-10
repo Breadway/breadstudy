@@ -49,7 +49,7 @@ def main():
 
     session = (WEB / "session.html").read_text()
     for token in ('rel="manifest"', "session-timer", "hint-list", "hint-btn",
-                  "latex-preview", "next-question-btn", "skip-btn", 'type="file"',
+                  "latex-preview", "sym-pi", "sym-sqrt", "sym-power", "Your answer (plain text or LaTeX)", "next-question-btn", "skip-btn", 'type="file"',
                   "latex-answer", "phase-row", "capture="):
         if token not in session:
             ok = fail("session.html missing " + token) and False

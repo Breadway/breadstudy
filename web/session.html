@@ -57,8 +57,13 @@
 <h2 id="answer-h">Answer input</h2>
 <div class="answer-grid">
 <div>
-<label for="latex-answer">Typed LaTeX answer</label>
-<textarea id="latex-answer" rows="2" placeholder="e.g. 63\pi\ \text{cm}^3"></textarea>
+<label for="latex-answer">Your answer (plain text or LaTeX)</label>
+<textarea id="latex-answer" rows="2" placeholder="e.g. 63 pi cm3, or 63\pi\ \text{cm}^3"></textarea>
+<div class="symbol-row" aria-label="Insert a symbol">
+<button id="sym-pi" class="symbol-btn" type="button" aria-label="Insert pi">&#960;</button>
+<button id="sym-sqrt" class="symbol-btn" type="button" aria-label="Insert square root">&#8730;</button>
+<button id="sym-power" class="symbol-btn" type="button" aria-label="Insert a power">x&#178;</button>
+</div>
 <p id="latex-preview" class="muted">Typed answer preview appears here.</p>
 </div>
 <div class="input-row">
@@ -75,6 +80,7 @@
 </main>
 <footer>Soft friction only. Nothing is blocked. Escape is always available via Skip.</footer>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="./scratchpad.js"></script>
 <script defer src="./app.js"></script>
 </body>
 </html>

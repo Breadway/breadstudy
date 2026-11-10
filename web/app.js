@@ -1140,9 +1140,27 @@ function logLocal(kind, payload) {
   } catch (e) { /* storage full or blocked, session continues */ }
 }
 
+function insertIntoAnswer(text) {
+  const latex = document.getElementById("latex-answer");
+  if (!latex) return;
+  const value = latex.value || "";
+  const start = Number.isFinite(latex.selectionStart) ? latex.selectionStart : value.length;
+  const end = Number.isFinite(latex.selectionEnd) ? latex.selectionEnd : value.length;
+  latex.value = value.slice(0, start) + text + value.slice(end);
+  try {
+    latex.setSelectionRange(start + text.length, start + text.length);
+  } catch (e) { /* some embedded webviews do not expose selection */ }
+  refreshAnswerPreview();
+}
+
 function bindAnswerInputs() {
   const latex = document.getElementById("latex-answer");
   if (latex) latex.addEventListener("input", refreshAnswerPreview);
+  const symbols = { "sym-pi": "\\pi ", "sym-sqrt": "\\sqrt{}", "sym-power": "^{2}" };
+  Object.keys(symbols).forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn) btn.addEventListener("click", () => insertIntoAnswer(symbols[id]));
+  });
   const photo = document.getElementById("photo-input");
   const photoStatus = document.getElementById("photo-status");
   if (photo) {
