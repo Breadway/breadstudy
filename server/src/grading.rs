@@ -184,6 +184,10 @@ impl Rubric {
             }
             Value::Object(object) => {
                 let mut rubric = Self::fallback(item_answer);
+                let answer_only = object
+                    .get("answer_only")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 rubric.method.clear();
                 if let Some(methods) = object.get("method").and_then(Value::as_array) {
                     for (index, entry) in methods.iter().enumerate() {
@@ -228,7 +232,7 @@ impl Rubric {
                         rubric.final_answer = answer.trim().to_string();
                     }
                 }
-                if rubric.method.is_empty() {
+                if rubric.method.is_empty() && !answer_only {
                     rubric.method = fallback.method;
                 }
                 rubric
@@ -1135,7 +1139,8 @@ async fn persist_attempt(
     response: &GraderResponse,
     transcription_confidence: Option<f32>,
 ) -> Result<GradedAttempt, GradeError> {
-    let (breakdown, method_marks, method_total) = score_method(rubric, answer_text, response);
+    let (breakdown, method_marks, method_total) =
+        score_method(rubric, answer_text, response);
 
     let deterministic_final = final_answer_matches(answer_text, &rubric.final_answer);
     let final_correct = deterministic_final.unwrap_or(response.final_correct);
@@ -1222,11 +1227,25 @@ fn score_method(
     answer_text: &str,
     response: &GraderResponse,
 ) -> (Vec<CriterionResult>, f32, f32) {
+    let working_captured = has_working_evidence(answer_text);
     let mut results = Vec::new();
     let mut awarded_total = 0.0;
     let mut marks_total = 0.0;
     for criterion in &rubric.method {
         marks_total += criterion.marks;
+        if !working_captured {
+            // A bare final answer earns the final mark at most. Method
+            // criteria are about the working, so the model's verdict only
+            // counts when there is working text to justify it.
+            results.push(CriterionResult {
+                id: criterion.id.clone(),
+                description: criterion.description.clone(),
+                marks: criterion.marks,
+                awarded: 0.0,
+                reason: "method marks need captured working, not just a final answer".into(),
+            });
+            continue;
+        }
         let verdict = response
             .method
             .iter()
@@ -1261,6 +1280,29 @@ fn score_method(
         });
     }
     (results, awarded_total, marks_total)
+}
+
+/// True when the submitted text contains something a marker can award a
+/// method mark for. A bare value such as `502.7 cm3` is only a final
+/// answer: units are stripped before looking for operators, a second
+/// quantity or a written method sentence.
+fn has_working_evidence(answer_text: &str) -> bool {
+    let stripped = strip_units(answer_text);
+    let trimmed = stripped.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed
+        .chars()
+        .any(|c| matches!(c, '=' | '≈' | '+' | '*' | '/' | '÷' | '×' | '^'))
+    {
+        return true;
+    }
+    if numbers(answer_text).len() >= 2 {
+        return true;
+    }
+    let words = trimmed.split_whitespace().count();
+    words >= 6 && trimmed.chars().any(|c| c.is_alphabetic())
 }
 
 fn keyword_match(description: &str, answer_text: &str) -> bool {
@@ -1457,10 +1499,34 @@ mod unit_tests {
     }
 
     #[test]
+    fn bare_final_answers_are_not_working_evidence() {
+        assert!(!has_working_evidence("502.7 cm3"));
+        assert!(!has_working_evidence("197.9 cm^3"));
+        assert!(!has_working_evidence("63pi cm3"));
+        assert!(!has_working_evidence(""));
+        assert!(has_working_evidence("V = pi r^2 h = 63pi"));
+        assert!(has_working_evidence("3 * 7 + 2"));
+        assert!(has_working_evidence(
+            "First multiply the base area by the height and check the units"
+        ));
+    }
+
+    #[test]
     fn empty_rubric_still_has_method_and_final_marks() {
         let rubric = Rubric::parse("[]", "10 cm2");
         assert_eq!(rubric.method.len(), 1);
         assert_eq!(rubric.method_total(), 1.0);
+        assert_eq!(rubric.final_marks, 1.0);
+    }
+
+    #[test]
+    fn answer_only_rubric_has_no_method_marks() {
+        let rubric = Rubric::parse(
+            r#"{"method":[],"final":{"marks":1,"answer":"10 cm2"},"answer_only":true}"#,
+            "10 cm2",
+        );
+        assert!(rubric.method.is_empty());
+        assert_eq!(rubric.method_total(), 0.0);
         assert_eq!(rubric.final_marks, 1.0);
     }
 

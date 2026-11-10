@@ -272,6 +272,42 @@ async fn graded_attempt_records_fsrs_and_moves_the_due_plan() {
 }
 
 #[tokio::test]
+async fn bare_final_answer_earns_no_method_marks() {
+    let (db, pool) = setup("bare-answer").await;
+    let grader = Arc::new(FakeGrader::new(vec![Ok(full_marks_response())]));
+    let service = GradingService::new(grader, 0.75);
+    let request = AttemptRequest {
+        item_id: ITEM_ID.into(),
+        input_kind: InputKind::Latex,
+        latex: Some("197.9 cm^3".into()),
+        transcript: None,
+        transcription_confidence: None,
+        photo_base64: None,
+        photo_media_type: None,
+        confirmed_text: None,
+        confirmed: false,
+        session_id: None,
+    };
+
+    let outcome = service.grade(&pool, request).await.unwrap();
+    let GradeOutcome::Graded { attempt } = outcome else {
+        panic!("expected a graded attempt");
+    };
+    assert!(attempt.correct, "the final answer is still marked correct");
+    assert_eq!(attempt.final_marks, 1.0);
+    assert_eq!(attempt.method_marks, 0.0);
+    assert_eq!(attempt.method_marks_total, 2.0);
+    assert!(attempt
+        .rubric_breakdown
+        .iter()
+        .all(|criterion| criterion.awarded == 0.0));
+    assert!(attempt.rubric_breakdown[0].reason.contains("working"));
+
+    drop(pool);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
 async fn sign_slip_tag_is_persisted_on_the_attempt() {
     let (db, pool) = setup("sign-slip").await;
     let sign_slip = response(

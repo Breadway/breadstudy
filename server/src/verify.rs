@@ -962,7 +962,7 @@ pub async fn store_item(pool: &sqlx::SqlitePool, item: &NewItem) -> anyhow::Resu
     };
     let id = uuid::Uuid::new_v4().to_string();
     let hash = dedupe_hash(&item.prompt);
-    let rubric = serde_json::to_string(&item.worked)?;
+    let rubric = rubric_json(&item.worked, &item.answer);
     let (source_url, source_snippet, fetched_at) = match &item.source {
         Some(s) => (
             Some(s.url.clone()),
@@ -990,6 +990,41 @@ pub async fn store_item(pool: &sqlx::SqlitePool, item: &NewItem) -> anyhow::Resu
     .execute(pool)
     .await?;
     get_item(pool, &id).await
+}
+
+/// Build the stored rubric. Worked steps become method criteria; an item
+/// with no captured working is stored as answer-only, so grading awards
+/// the final mark and never invents method marks.
+fn rubric_json(worked: &[String], answer: &str) -> String {
+    let steps: Vec<&str> = worked
+        .iter()
+        .map(|step| step.trim())
+        .filter(|step| !step.is_empty())
+        .collect();
+    if steps.is_empty() {
+        return serde_json::json!({
+            "method": [],
+            "final": {"marks": 1, "answer": answer},
+            "answer_only": true,
+        })
+        .to_string();
+    }
+    let method: Vec<serde_json::Value> = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            serde_json::json!({
+                "id": format!("step-{}", index + 1),
+                "description": step,
+                "marks": 1,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "method": method,
+        "final": {"marks": 1, "answer": answer},
+    })
+    .to_string()
 }
 
 /// Find an item by its prompt without running the gate. Used to keep
@@ -1160,5 +1195,21 @@ mod unit_tests {
         assert!((tolerance("90*pi", "282.9") - 0.051).abs() < 1e-12);
         // Plain decimals of different precision: coarser rounding governs.
         assert!((tolerance("293.87", "294") - 0.51).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rubric_json_marks_answer_only_when_no_working_was_captured() {
+        let answer_only = rubric_json(&[], "502.7 cm3");
+        let value: serde_json::Value = serde_json::from_str(&answer_only).unwrap();
+        assert_eq!(value["answer_only"], true);
+        assert!(value["method"].as_array().unwrap().is_empty());
+        assert_eq!(value["final"]["answer"], "502.7 cm3");
+
+        let worked = vec!["V = pi*r^2*h".to_string(), "= 502.7".to_string()];
+        let rubric = rubric_json(&worked, "502.7 cm3");
+        let value: serde_json::Value = serde_json::from_str(&rubric).unwrap();
+        assert_eq!(value["method"].as_array().unwrap().len(), 2);
+        assert_eq!(value["method"][0]["id"], "step-1");
+        assert!(value.get("answer_only").is_none());
     }
 }
