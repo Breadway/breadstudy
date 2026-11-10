@@ -68,6 +68,35 @@ async fn plan_writes_logged_picks() {
 }
 
 #[tokio::test]
+async fn rank_day_is_a_pure_read() {
+    let db = temp_db("read-only");
+    let pool = test_pool(&db).await;
+    let first = breadstudy_server::planner::rank_day(
+        &pool,
+        day(),
+        breadstudy_server::planner::no_fsrs,
+        3,
+    )
+    .await
+    .unwrap();
+    let second = breadstudy_server::planner::rank_day(
+        &pool,
+        day(),
+        breadstudy_server::planner::no_fsrs,
+        3,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first, second);
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM plans")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "GET /api/plan must not insert plan rows");
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
 async fn skipped_skill_resurfaces_on_the_next_plan() {
     let db = temp_db("skip");
     let pool = test_pool(&db).await;

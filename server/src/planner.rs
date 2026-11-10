@@ -207,9 +207,10 @@ async fn last_planned(pool: &SqlitePool) -> anyhow::Result<Option<(String, Strin
     Ok(row)
 }
 
-/// Plan the next skills for `date`, log the picks, and return them.
+/// Rank the next skills for `date` without writing anything. This backs
+/// the read-only GET, so a poll cannot create plan rows (STUDY-108).
 /// Reproducible for a fixed database state: the pure scorer decides.
-pub async fn plan_day(
+pub async fn rank_day(
     pool: &SqlitePool,
     date: NaiveDate,
     due: DueScoreFn,
@@ -235,8 +236,21 @@ pub async fn plan_day(
         due,
     };
     let ranked = score_skills(&inputs);
+    Ok(ranked.into_iter().take(limit).collect())
+}
+
+/// Plan the next skills for `date`, log the picks, and return them.
+/// Reproducible for a fixed database state: the pure scorer decides.
+/// Only the POST route calls this; GET uses [`rank_day`].
+pub async fn plan_day(
+    pool: &SqlitePool,
+    date: NaiveDate,
+    due: DueScoreFn,
+    limit: usize,
+) -> anyhow::Result<Vec<ScoredSkill>> {
+    let ranked = rank_day(pool, date, due, limit).await?;
     let date_s = date.format("%Y-%m-%d").to_string();
-    for pick in ranked.iter().take(limit) {
+    for pick in &ranked {
         sqlx::query("INSERT INTO plans(id, date, skill_id, score, reason) VALUES(?,?,?,?,?)")
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(&date_s)
@@ -246,7 +260,7 @@ pub async fn plan_day(
             .execute(pool)
             .await?;
     }
-    Ok(ranked.into_iter().take(limit).collect())
+    Ok(ranked)
 }
 
 #[derive(Deserialize)]
@@ -266,15 +280,19 @@ pub fn router(pool: SqlitePool) -> Router {
 /// narrow `fn(&str) -> Option<f64>` boundary.
 pub fn router_with(pool: SqlitePool, due: DueScoreFn) -> Router {
     let due_pool = pool.clone();
+    let get_pool = due_pool.clone();
+    let post_pool = due_pool;
     Router::new()
         .route(
             "/api/plan",
-            get(
-                move |query: Query<PlanQuery>| {
-                    let pool = due_pool.clone();
-                    async move { plan_limited(State(pool), query, due).await }
-                },
-            ),
+            get(move |query: Query<PlanQuery>| {
+                let pool = get_pool.clone();
+                async move { plan_limited(State(pool), query, due, false).await }
+            })
+            .post(move |query: Query<PlanQuery>| {
+                let pool = post_pool.clone();
+                async move { plan_limited(State(pool), query, due, true).await }
+            }),
         )
         .with_state(pool)
 }
@@ -283,6 +301,7 @@ async fn plan_limited(
     State(pool): State<SqlitePool>,
     query: Query<PlanQuery>,
     due: DueScoreFn,
+    write: bool,
 ) -> Result<Json<Vec<ScoredSkill>>, (StatusCode, Json<serde_json::Value>)> {
     let err =
         |message: String| (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": message })));
@@ -293,14 +312,18 @@ async fn plan_limited(
         }
         None => chrono::Utc::now().date_naive(),
     };
-    let picks = plan_day(&pool, date, due, query.limit.unwrap_or(3))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
+    let limit = query.limit.unwrap_or(3);
+    let result = if write {
+        plan_day(&pool, date, due, limit).await
+    } else {
+        rank_day(&pool, date, due, limit).await
+    };
+    let picks = result.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
     Ok(Json(picks))
 }
 
