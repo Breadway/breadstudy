@@ -3,7 +3,15 @@
  * [{ id, strand, name, vault_note }]
  * Session phases follow spec/session.md.
  */
-const PHASES = ["prime", "recall", "practice", "explain", "reflect", "break", "end"];
+const DEFAULT_PLAN = [
+  { phase: "prime", planned_seconds: 0 },
+  { phase: "recall", planned_seconds: 2 * 60 },
+  { phase: "practice", planned_seconds: 10 * 60 },
+  { phase: "explain", planned_seconds: 5 * 60 },
+  { phase: "reflect", planned_seconds: 3 * 60 },
+  { phase: "break", planned_seconds: 0 },
+  { phase: "end", planned_seconds: 0 }
+];
 const TEMPLATE_20 = { recall: 2 * 60, practice: 10 * 60, explain: 5 * 60, reflect: 3 * 60 };
 const ACTIVE_SESSION_KEY = "breadstudy-active-session";
 const SESSION_CACHE_KEY = "breadstudy-session-cache";
@@ -64,6 +72,7 @@ let sessionState = {
   item: null,
   sessionId: null,
   template: null,
+  plan: null,
   serverMode: false,
   phaseExhausted: false,
   idle: true,
@@ -157,6 +166,7 @@ function applyServerView(view, options) {
   sessionState.idle = false;
   sessionState.sessionId = view.id;
   sessionState.template = view.template || sessionState.template;
+  sessionState.plan = Array.isArray(view.plan) && view.plan.length > 0 ? view.plan : null;
   if (view.id !== sessionStatsId) {
     sessionStatsId = view.id;
     sessionStats = loadSessionStats(view.id);
@@ -814,8 +824,16 @@ async function submitAnswer() {
   }
 }
 
+function activePlan() {
+  return Array.isArray(sessionState.plan) && sessionState.plan.length > 0
+    ? sessionState.plan
+    : DEFAULT_PLAN;
+}
+
 function currentPhase() {
-  return PHASES[sessionState.phaseIndex] || "end";
+  const plan = activePlan();
+  const entry = plan[sessionState.phaseIndex];
+  return (entry && entry.phase) || "end";
 }
 
 function renderPhases(rootId) {
@@ -827,10 +845,16 @@ function renderPhases(rootId) {
     if (label) label.textContent = "Ready to start";
     return;
   }
-  PHASES.forEach((p, i) => {
+  const plan = activePlan();
+  plan.forEach((entry, i) => {
+    const phase = entry.phase;
+    // Zero-duration phases are skipped by the server; do not draw a chip
+    // that claims they were done. Always show the active phase, including end.
+    if (Number(entry.planned_seconds) === 0 && i !== sessionState.phaseIndex) return;
     const el = document.createElement("span");
-    el.className = "phase" + (i === sessionState.phaseIndex ? " active" : i < sessionState.phaseIndex ? " done" : "");
-    el.textContent = p;
+    const done = Boolean(entry.done) || i < sessionState.phaseIndex;
+    el.className = "phase" + (i === sessionState.phaseIndex ? " active" : done ? " done" : "");
+    el.textContent = phase;
     root.appendChild(el);
   });
   if (label) label.textContent = "Phase: " + currentPhase();
@@ -903,6 +927,7 @@ function setIdleState() {
   sessionState.idle = true;
   sessionState.serverMode = false;
   sessionState.sessionId = null;
+  sessionState.plan = null;
   sessionState.item = null;
   sessionState.remaining = 0;
   sessionState.hintsUnlocked = 0;
@@ -997,10 +1022,13 @@ async function advancePhase() {
       logLocal("advance-failed", { error: String(e) });
     }
   }
-  if (sessionState.phaseIndex < PHASES.length - 1) {
-    sessionState.phaseIndex += 1;
+  const plan = activePlan();
+  let nextIndex = sessionState.phaseIndex + 1;
+  while (nextIndex < plan.length && Number(plan[nextIndex].planned_seconds) === 0) nextIndex += 1;
+  if (nextIndex < plan.length) {
+    sessionState.phaseIndex = nextIndex;
     const phase = currentPhase();
-    sessionState.remaining = TEMPLATE_20[phase] || 60;
+    sessionState.remaining = Number(plan[nextIndex].planned_seconds) || TEMPLATE_20[phase] || 60;
     renderPhases("phase-row");
     renderTimer();
     logLocal("phase", { phase });
