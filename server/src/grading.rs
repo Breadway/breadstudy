@@ -653,6 +653,16 @@ impl HttpGrader {
         }
         let envelope: Value = serde_json::from_str(&text)?;
         let content = match &envelope["choices"][0]["message"]["content"] {
+            Value::String(text) if text.trim().is_empty() => {
+                let finish = envelope["choices"][0]["finish_reason"]
+                    .as_str()
+                    .unwrap_or("unknown");
+                let completion = envelope["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+                anyhow::bail!(
+                    "model {} returned empty content (finish_reason={finish}, completion_tokens={completion})",
+                    endpoint.model
+                )
+            }
             Value::String(text) => text.clone(),
             Value::Array(parts) => parts
                 .iter()
