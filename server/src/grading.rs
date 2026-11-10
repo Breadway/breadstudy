@@ -615,7 +615,7 @@ impl HttpGrader {
         let body = json!({
             "model": endpoint.model,
             "temperature": 0.0,
-            "max_tokens": 2000,
+            "max_tokens": 8000,
             "messages": [
                 {"role": "system", "content": "You are a precise maths marker. Return only JSON."},
                 {"role": "user", "content": user_content}
