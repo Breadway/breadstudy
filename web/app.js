@@ -12,6 +12,8 @@ let sessionState = {
   remaining: TEMPLATE_20.recall,
   timerId: null,
   hintsUsed: 0,
+  hintsUnlocked: 0,
+  hintTotal: 0,
   item: null,
   sessionId: null,
   serverMode: false
@@ -101,19 +103,35 @@ function applyServerView(view) {
   const index = typeof view.phase_index === "number" ? view.phase_index : PHASE_INDEX[view.phase];
   sessionState.phaseIndex = index !== undefined ? index : 0;
   sessionState.remaining = view.phase_remaining_seconds || 0;
-  sessionState.hintsUsed = view.hints_used || 0;
+  const previous = sessionState.item;
   if (view.item) {
+    const incoming = view.item.hints || [];
+    const total = Number(view.item.hint_count) || incoming.length;
+    let ladder = incoming.slice();
+    if (previous && previous.id === view.item.id && Array.isArray(previous.hints)) {
+      if (previous.hints.length > ladder.length) ladder = previous.hints.slice();
+      incoming.forEach((hint, idx) => { ladder[idx] = hint; });
+    }
+    const unlocked = Number.isFinite(view.item.hint_unlocked)
+      ? Number(view.item.hint_unlocked)
+      : (Number.isFinite(view.hints_used) ? Number(view.hints_used) : 0);
     sessionState.item = {
       id: view.item.id,
       skill_id: view.item.skill_id,
       strand: view.item.strand,
       prompt: view.item.prompt,
-      hints: view.item.hints || [],
-      hint_count: view.item.hint_count
+      hints: ladder,
+      hint_count: Math.max(total, ladder.length),
+      hint_unlocked: unlocked
     };
+    sessionState.hintsUnlocked = unlocked;
+    sessionState.hintTotal = Math.max(total, ladder.length);
   } else {
     sessionState.item = null;
+    sessionState.hintsUnlocked = 0;
+    sessionState.hintTotal = 0;
   }
+  sessionState.hintsUsed = sessionState.hintsUnlocked;
   persistSessionId(view.id);
   renderPhases("phase-row");
   renderTimer();
@@ -467,24 +485,41 @@ function renderHints() {
   if (!root) return;
   root.innerHTML = "";
   const item = sessionState.item || (sessionState.sessionId ? null : SAMPLE_ITEM);
+  const btn = document.getElementById("hint-btn");
+  const meta = document.getElementById("hint-meta");
   if (!item) {
-    const meta = document.getElementById("hint-meta");
     if (meta) meta.textContent = "Start a session to load the hint ladder.";
-    const btn = document.getElementById("hint-btn");
     if (btn) btn.disabled = true;
     return;
   }
-  item.hints.forEach((hint, idx) => {
+  const ladder = Array.isArray(item.hints) ? item.hints : [];
+  const total = Math.max(Number(item.hint_count) || 0, Number(sessionState.hintTotal) || 0, ladder.length);
+  const unlocked = Math.max(0, Math.min(
+    Number.isFinite(sessionState.hintsUnlocked) ? sessionState.hintsUnlocked : sessionState.hintsUsed,
+    total
+  ));
+  if (total === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "This item has no hint ladder. Ask the tutor on the board instead.";
+    root.appendChild(empty);
+  }
+  for (let idx = 0; idx < total; idx += 1) {
     const div = document.createElement("div");
-    const unlocked = idx < sessionState.hintsUsed;
-    div.className = "hint" + (unlocked ? "" : " locked");
-    div.textContent = unlocked ? "Hint " + (idx + 1) + ": " + hint : "Hint " + (idx + 1) + ": locked";
+    const isUnlocked = idx < unlocked;
+    div.className = "hint" + (isUnlocked ? "" : " locked");
+    if (isUnlocked) {
+      const text = ladder[idx];
+      div.textContent = text
+        ? "Hint " + (idx + 1) + ": " + text
+        : "Hint " + (idx + 1) + ": revealed. Reload the session to fetch its text.";
+    } else {
+      div.textContent = "Hint " + (idx + 1) + " of " + total + ": locked";
+    }
     root.appendChild(div);
-  });
-  const btn = document.getElementById("hint-btn");
-  if (btn) btn.disabled = sessionState.hintsUsed >= item.hints.length;
-  const meta = document.getElementById("hint-meta");
-  if (meta) meta.textContent = "Hints used: " + sessionState.hintsUsed + " of " + item.hints.length;
+  }
+  if (btn) btn.disabled = total === 0 || unlocked >= total;
+  if (meta) meta.textContent = "Hints used: " + unlocked + " of " + total;
 }
 
 async function useHint() {
@@ -494,20 +529,37 @@ async function useHint() {
         "/api/session/" + sessionState.sessionId + "/hint",
         {}
       );
-      sessionState.hintsUsed = outcome.hints_used;
-      if (outcome.session) sessionState.phaseIndex = PHASE_INDEX[outcome.session.phase];
+      if (outcome.session) applyServerView(outcome.session);
+      const unlocked = outcome.session && outcome.session.item && Number.isFinite(outcome.session.item.hint_unlocked)
+        ? Number(outcome.session.item.hint_unlocked)
+        : Number(outcome.hints_used);
+      if (Number.isFinite(unlocked)) {
+        sessionState.hintsUnlocked = unlocked;
+        sessionState.hintsUsed = unlocked;
+      }
+      if (outcome.hint && sessionState.item) {
+        const idx = Math.max(0, (Number(outcome.hints_used) || 1) - 1);
+        if (!sessionState.item.hints) sessionState.item.hints = [];
+        sessionState.item.hints[idx] = outcome.hint;
+        sessionState.item.hint_count = Math.max(
+          Number(sessionState.item.hint_count) || 0,
+          sessionState.item.hints.length
+        );
+      }
       renderHints();
-      logLocal("hint", { session: sessionState.sessionId, count: sessionState.hintsUsed, source: "server" });
+      logLocal("hint", { session: sessionState.sessionId, count: sessionState.hintsUnlocked, source: "server" });
       return;
     } catch (e) {
       logLocal("hint-failed", { error: String(e) });
     }
   }
   const item = sessionState.item || SAMPLE_ITEM;
-  if (sessionState.hintsUsed < item.hints.length) {
-    sessionState.hintsUsed += 1;
+  const total = Math.max(item.hints.length, sessionState.hintTotal || 0);
+  if (sessionState.hintsUnlocked < total) {
+    sessionState.hintsUnlocked += 1;
+    sessionState.hintsUsed = sessionState.hintsUnlocked;
     renderHints();
-    logLocal("hint", { item: item.id, count: sessionState.hintsUsed });
+    logLocal("hint", { item: item.id, count: sessionState.hintsUnlocked });
   }
 }
 
