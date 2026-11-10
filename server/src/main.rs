@@ -59,7 +59,8 @@ fn build_router(pool: SqlitePool, web_dir: PathBuf) -> anyhow::Result<Router> {
         .merge(planner::router(pool.clone()))
         .merge(api::fsrs_routes().with_state(pool.clone()))
         .merge(api::grading_router(grading))
-        .merge(breadstudy_server::progress::progress_router(pool.clone()));
+        .merge(breadstudy_server::progress::progress_router(pool.clone()))
+        .merge(breadstudy_server::skills::skill_router(pool.clone()));
 
     // The teacher scratchpad is optional: without a key the rest of the app
     // still works, and the UI shows the failure instead of a blank pane.

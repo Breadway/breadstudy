@@ -256,11 +256,14 @@ impl SessionEngine {
 }
 
 /// Options for starting a session.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct StartOptions {
     pub template: Template,
     pub grace_tokens: u32,
     pub engine: SessionEngine,
+    /// Restrict selection to one skill (STUDY-45 "practise this skill").
+    /// `None` keeps the usual due-ordered, whole-bank selection.
+    pub skill_id: Option<String>,
 }
 
 impl StartOptions {
@@ -269,7 +272,15 @@ impl StartOptions {
             template,
             grace_tokens: 1,
             engine: SessionEngine::new(),
+            skill_id: None,
         }
+    }
+
+    /// Scope the run to one skill. Selection still orders by FSRS due-ness
+    /// and rotates inside the skill, it just drops every other skill first.
+    pub fn with_skill(mut self, skill_id: impl Into<String>) -> Self {
+        self.skill_id = Some(skill_id.into());
+        self
     }
 }
 
@@ -898,7 +909,14 @@ pub async fn start(
     while phase_index + 1 < plan.len() && plan[phase_index].seconds == 0 {
         phase_index += 1;
     }
-    let bank = load_bank(pool).await?;
+    let mut bank = load_bank(pool).await?;
+    if let Some(skill_id) = options.skill_id.as_deref() {
+        bank.retain(|item| item.skill_id == skill_id);
+        anyhow::ensure!(
+            !bank.is_empty(),
+            "skill {skill_id} has no verified items to practise"
+        );
+    }
     // The FSRS engine loads due scores once per run, so newly graded
     // attempts change the very next session's order. Rotation advances
     // with the run count to avoid replaying the same items.
