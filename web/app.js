@@ -1546,6 +1546,7 @@ function weakRow(skill) {
 }
 
 async function renderDashboard() {
+  if (!document.getElementById("dash-today")) return;
   updateStartLink();
   const dateEl = document.getElementById("dash-date");
   if (dateEl) {
@@ -1784,7 +1785,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindAnswerInputs();
   renderDashboard();
   registerSW();
-  restoreSession();
+  if (document.getElementById("sessionbar")) restoreSession();
   updateOnlineStatus();
   if (typeof navigator !== "undefined" && navigator.onLine === false) restoreCachedBoard();
   if (window.addEventListener) {
