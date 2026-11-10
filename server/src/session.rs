@@ -20,10 +20,12 @@
 //! stay outside the session engine.
 //!
 //! Hint progress is not stored on the run. `hint_state` is the single
-//! source of truth: [`hint`] advances it through [`fsrs::next_hint`] and
-//! the rendered view only mirrors the current level. Graded attempts go
-//! through [`grade`], which calls [`fsrs::record_attempt`] so mastery,
-//! due dates and error patterns update from real sessions.
+//! source of truth, keyed by session id and item, so every run starts at
+//! zero and two sessions never share a cursor: [`hint`] advances it through
+//! [`fsrs::next_hint_for_session`] and the rendered view mirrors the current
+//! level as `hint_unlocked` while always shipping the full ladder. Graded
+//! attempts go through [`grade`], which calls [`fsrs::record_attempt`] so
+//! mastery, due dates and error patterns update from real sessions.
 //!
 //! FSRS due-ness is an optional narrow boundary: [`SessionEngine`]
 //! accepts a `fn(&str) -> Option<f64>` scorer. When the FSRS module is
@@ -262,8 +264,9 @@ pub struct CachedItem {
     pub audio_path: Option<String>,
 }
 
-/// The cached item as served to the client. Hints are only the ones
-/// unlocked so far; the client never receives locked hints.
+/// The cached item as served to the client. The full authored ladder ships
+/// with the item; `hint_unlocked` and `hint_count` tell the client how many
+/// rungs the student may currently see.
 #[derive(Debug, Clone, Serialize)]
 pub struct ItemView {
     pub id: String,
@@ -273,6 +276,7 @@ pub struct ItemView {
     pub audio_path: Option<String>,
     pub hints: Vec<String>,
     pub hint_count: usize,
+    pub hint_unlocked: usize,
 }
 
 /// One phase in the rendered plan.
@@ -300,6 +304,8 @@ pub struct SessionView {
     pub skip_count: u32,
     pub grace_tokens: u32,
     pub hints_used: u32,
+    /// Rungs of the current item's ladder unlocked in this session run.
+    pub hint_unlocked: usize,
     pub item: Option<ItemView>,
     pub plan: Vec<PhaseView>,
     pub started_at: String,
@@ -426,8 +432,9 @@ impl Run {
             strand: cached.strand.clone(),
             prompt: cached.prompt.clone(),
             audio_path: cached.audio_path.clone(),
-            hints: cached.hints.iter().take(hint_level).cloned().collect(),
+            hints: cached.hints.clone(),
             hint_count: cached.hints.len(),
+            hint_unlocked: hint_level.min(cached.hints.len()),
         });
         SessionView {
             id: self.id.clone(),
@@ -442,6 +449,7 @@ impl Run {
             skip_count: self.skip_count,
             grace_tokens: self.grace_tokens,
             hints_used: hint_level as u32,
+            hint_unlocked: hint_level,
             item,
             plan: phases,
             started_at: encode_ts(self.started_at),
@@ -482,15 +490,17 @@ fn current_cached(run: &Run) -> Option<&CachedItem> {
 }
 
 /// Read the ladder cursor for the run's current item. `hint_state` owns
-/// this value; the run only mirrors it for rendering.
+/// this value, keyed by session id; the run only mirrors it for rendering.
 async fn hint_level_for(pool: &SqlitePool, run: &Run) -> anyhow::Result<i64> {
     let Some(item) = current_cached(run) else {
         return Ok(0);
     };
-    let level: Option<i64> = sqlx::query_scalar("SELECT level FROM hint_state WHERE item_id = ?")
-        .bind(&item.id)
-        .fetch_optional(pool)
-        .await?;
+    let level: Option<i64> =
+        sqlx::query_scalar("SELECT level FROM hint_state WHERE session_id = ? AND item_id = ?")
+            .bind(&run.id)
+            .bind(&item.id)
+            .fetch_optional(pool)
+            .await?;
     Ok(level.unwrap_or(0).max(0))
 }
 
@@ -498,7 +508,7 @@ async fn hint_level_for(pool: &SqlitePool, run: &Run) -> anyhow::Result<i64> {
 /// exists so a session does not re-read items mid-run, but `hint_state`
 /// and `items.hints` decide what the rungs actually are.
 async fn sync_cached_ladder(pool: &SqlitePool, run: &mut Run, item_id: &str) -> anyhow::Result<()> {
-    let ladder = fsrs::hint_ladder(pool, item_id).await?;
+    let ladder = fsrs::hint_ladder_for_session(pool, item_id, &run.id).await?;
     for cached in &mut run.content {
         if cached.id == item_id {
             cached.hints = ladder.levels.clone();
@@ -831,14 +841,14 @@ pub async fn start(
     }
     let bank = load_bank(pool).await?;
     let mut content = select_content(options.template, &bank, options.engine);
-    // The cached rungs mirror items.hints and the hint_state cursor. Sync
-    // once at start so a stale or too-short authored ladder cannot leak a
-    // different ladder than the one FSRS advances.
+    let id = Uuid::new_v4().to_string();
+    // The cached rungs mirror items.hints and this run's hint_state row.
+    // Creating the row at start fixes the cursor at zero for every session,
+    // so an earlier run's revealed hints cannot leak in.
     for item in &mut content {
-        let ladder = fsrs::hint_ladder(pool, &item.id).await?;
+        let ladder = fsrs::hint_ladder_for_session(pool, &item.id, &id).await?;
         item.hints = ladder.levels;
     }
-    let id = Uuid::new_v4().to_string();
     let phase = plan[phase_index].phase;
     let phase_remaining_seconds = plan[phase_index].seconds;
     let item_cursor = first_content_index(&content, phase);
@@ -1073,7 +1083,7 @@ pub async fn hint(
             session: run.view(now),
         }));
     };
-    let reveal = fsrs::next_hint(pool, &item_id).await?;
+    let reveal = fsrs::next_hint_for_session(pool, &item_id, Some(&run.id)).await?;
     if let Some(reveal) = reveal.as_ref() {
         // The authoritative ladder may have been authored or repaired on
         // first use; refresh the cached rungs so the view matches it.
