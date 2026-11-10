@@ -222,8 +222,19 @@ function renderGrade(attempt) {
   if (!box) return;
   box.innerHTML = "";
   const verdict = document.createElement("p");
-  verdict.className = attempt.correct ? "grade ok" : "grade bad";
-  verdict.textContent = attempt.correct ? "Correct." : "Not quite.";
+  const finalFull = attempt.final_marks_total > 0 && attempt.final_marks >= attempt.final_marks_total;
+  const methodFull = attempt.method_marks_total > 0 && attempt.method_marks >= attempt.method_marks_total;
+  let verdictText = "Not quite.";
+  let verdictClass = "grade bad";
+  if (attempt.correct && methodFull) {
+    verdictText = "Correct, with working.";
+    verdictClass = "grade ok";
+  } else if (attempt.correct || finalFull) {
+    verdictText = "Answer is right, but the working needed more.";
+    verdictClass = "grade partial";
+  }
+  verdict.className = verdictClass;
+  verdict.textContent = verdictText;
   box.appendChild(verdict);
 
   const marks = document.createElement("p");
