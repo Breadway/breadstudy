@@ -57,7 +57,7 @@ def main():
         ok = fail("session.html missing viewport meta") and False
 
     index = (WEB / "index.html").read_text()
-    for token in ("dash-today", "dash-skills", "Upcoming assessments", "Test 6"):
+    for token in ("dash-today", "dash-skills", "Upcoming assessments", "dash-assess"):
         if token not in index:
             ok = fail("index.html missing " + token) and False
 

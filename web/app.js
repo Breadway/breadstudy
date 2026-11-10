@@ -1110,6 +1110,28 @@ async function skipItem() {
   }
 }
 
+function localDayKey(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate());
+}
+
+function computeSessionStreak(log) {
+  const starts = (Array.isArray(log) ? log : []).filter((entry) => entry.kind === "session-start" && entry.at);
+  if (starts.length === 0) return 0;
+  const days = new Set(starts.map((entry) => localDayKey(new Date(entry.at))));
+  const cursor = new Date();
+  if (!days.has(localDayKey(cursor))) {
+    cursor.setDate(cursor.getDate() - 1);
+    if (!days.has(localDayKey(cursor))) return 0;
+  }
+  let streak = 0;
+  while (days.has(localDayKey(cursor))) {
+    streak += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
 async function renderDashboard() {
   const skills = await fetchSkills();
   const el = document.getElementById("dash-skills");
@@ -1123,29 +1145,46 @@ async function renderDashboard() {
   }
 
   const today = document.getElementById("dash-today");
-  if (today) today.textContent = "Today: 20 min school-day session. Start to pull a due skill from the planner.";
+  if (today) today.textContent = "Today: a 20 minute school-day session. Start to pull a due skill from the planner.";
+
+  let log = [];
+  try {
+    log = JSON.parse(localStorage.getItem("breadstudy-log") || "[]");
+  } catch (e) { /* local history is best effort */ }
+
+  const streakEl = document.getElementById("dash-streak");
+  if (streakEl) {
+    const streak = computeSessionStreak(log);
+    streakEl.textContent = streak + (streak === 1 ? " day" : " days");
+    if (streak === 0) streakEl.title = "No consecutive session days recorded on this device yet.";
+  }
 
   const weak = document.getElementById("dash-weak");
   if (weak) {
     try {
       const due = await fetch("/api/plan/due", { headers: { accept: "application/json" } }).then((r) => r.json());
       weak.innerHTML = "";
-      if (Array.isArray(due) && due.length > 0) {
-        due.slice(0, 5).forEach((skill) => {
+      const reviewed = Array.isArray(due)
+        ? due.filter((skill) => Number(skill.reviews) > 0)
+        : [];
+      if (reviewed.length > 0) {
+        reviewed.slice(0, 5).forEach((skill) => {
           const li = document.createElement("li");
           const pct = Math.round((skill.mastery || 0) * 100);
-          li.textContent = skill.name + " (" + pct + "% mastery)";
+          li.textContent = skill.name + " (" + pct + "% mastery, " + skill.reviews + " reviews)";
           weak.appendChild(li);
         });
       } else {
         const li = document.createElement("li");
-        li.textContent = "Nothing due yet. Finish a session to start tracking mastery.";
+        li.textContent = Array.isArray(due) && due.length > 0
+          ? "No mastery data yet. The planner lists skills, but none have a graded review. Finish a session to start tracking."
+          : "No mastery data yet. Finish a session to start tracking.";
         weak.appendChild(li);
       }
     } catch (e) {
       weak.innerHTML = "";
       const li = document.createElement("li");
-      li.textContent = "Due list unavailable right now.";
+      li.textContent = "Mastery data is unavailable right now. This is not an empty result.";
       weak.appendChild(li);
     }
   }
@@ -1153,14 +1192,14 @@ async function renderDashboard() {
   const history = document.getElementById("dash-history");
   if (history) {
     try {
-      const log = JSON.parse(localStorage.getItem("breadstudy-log") || "[]");
       history.innerHTML = "";
-      if (log.length === 0) {
+      const starts = log.filter((entry) => entry.kind === "session-start");
+      if (starts.length === 0) {
         const li = document.createElement("li");
         li.textContent = "No sessions recorded on this device yet.";
         history.appendChild(li);
       } else {
-        log.filter((entry) => entry.kind === "session-start").slice(-5).reverse().forEach((entry) => {
+        starts.slice(-5).reverse().forEach((entry) => {
           const li = document.createElement("li");
           li.textContent = new Date(entry.at).toLocaleString() + " - " + (entry.payload.template || "session");
           history.appendChild(li);
@@ -1289,5 +1328,7 @@ window.BreadstudySession = {
   updateOnlineStatus,
   flushAttemptQueue,
   readAttemptQueue,
-  restoreCachedBoard
+  restoreCachedBoard,
+  computeSessionStreak,
+  renderDashboard
 };
