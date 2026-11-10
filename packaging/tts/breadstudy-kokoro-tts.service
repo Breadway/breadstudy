@@ -11,7 +11,7 @@ Environment=KOKORO_MODEL=/var/lib/breadstudy/tts/kokoro-v1.0.onnx
 Environment=KOKORO_VOICES=/var/lib/breadstudy/tts/voices-v1.0.bin
 Environment=KOKORO_LOG_LEVEL=INFO
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/.local/share/breadstudy/kokoro-venv/bin/python %h/breadstudy/packaging/tts/kokoro_server.py
+ExecStart=%h/.local/share/breadstudy/kokoro-venv/bin/python %h/breadstudy/scripts/kokoro_server.py
 Restart=on-failure
 RestartSec=5
 

@@ -1,0 +1,32 @@
+# breadstudy Kokoro TTS sidecar for the compose network.
+#
+# Build from the repository root:
+#   docker compose -f packaging/compose.yaml --project-directory . build tts
+#
+# Model weights are not baked into the image. Mount the host model directory
+# read-only at /models. The service is only reachable on the compose network;
+# it publishes no host port.
+
+FROM docker.io/library/python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    KOKORO_HOST=0.0.0.0 \
+    KOKORO_PORT=7314 \
+    KOKORO_ALLOW_NETWORK=1 \
+    KOKORO_MODEL=/models/kokoro-v1.0.onnx \
+    KOKORO_VOICES=/models/voices-v1.0.bin \
+    KOKORO_PRELOAD=1 \
+    KOKORO_LOG_LEVEL=INFO
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir kokoro-onnx==0.6.1 soundfile
+
+WORKDIR /app
+COPY scripts/kokoro_server.py /app/kokoro_server.py
+
+EXPOSE 7314
+CMD ["python", "/app/kokoro_server.py"]

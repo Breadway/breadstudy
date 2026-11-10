@@ -246,9 +246,14 @@ impl TtsService {
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap_or_default();
-        let kokoro_url = std::env::var("BREADSTUDY_KOKORO_TTS_URL")
+        let kokoro_url = std::env::var("BREADSTUDY_TTS_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("BREADSTUDY_KOKORO_TTS_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
             .unwrap_or_else(|| DEFAULT_KOKORO_URL.to_string());
         let breeze_url = std::env::var("BREADSTUDY_BREEZE_TTS_URL")
             .ok()
@@ -379,13 +384,19 @@ impl TtsService {
             "voice": voice,
             "speed": speed,
         });
-        let response = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| format!("Kokoro sidecar is unreachable: {error}"))?;
+        let send = || self.http.post(&url).json(&body).send();
+        let response = match send().await {
+            Ok(response) => response,
+            Err(first) => {
+                // A compose restart can return before the Python process has
+                // bound its socket. One short retry covers that startup race
+                // without making a genuinely absent sidecar wait long.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                send().await.map_err(|second| {
+                    format!("Kokoro sidecar is unreachable: {first}; retry: {second}")
+                })?
+            }
+        };
         let status = response.status();
         let content_type = response
             .headers()

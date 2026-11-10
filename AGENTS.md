@@ -12,7 +12,7 @@ Rust axum + SQLite, same deploy pattern as bread-tracker and breadboard.
 ## Ports and identity
 
 - Web: host 7220, container 7290, BIPS id `breadstudy-web-prod`.
-- TTS sidecar (Kokoro): loopback 7314.
+- TTS: compose service `tts` on 7314 inside the compose network, no host port; host-only unit uses loopback 7314. Host-loopback services are not reachable from the app container.
 - Breeze broker: 7312, upstream Breeze server 7313, BIPS id `breadstudy-tts-prod`.
 - Breeze benchmark numbers: `docs/voice/benchmark-q4k-a380.md`.
 
