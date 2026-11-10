@@ -371,6 +371,18 @@ async fn next_item_session(
     Ok(Json(view))
 }
 
+async fn grade_parts_session(
+    State(state): State<SessionState>,
+    Path(id): Path<String>,
+    Json(request): Json<session::MultiPartRequest>,
+) -> Result<Json<session::MultiPartGradeOutcome>, ApiError> {
+    let outcome = session::grade_parts(&state.pool, &id, request, Utc::now())
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| ApiError::not_found(&id))?;
+    Ok(Json(outcome))
+}
+
 async fn weekly_skips(
     State(state): State<SessionState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -399,6 +411,7 @@ pub fn session_router_with_engine(pool: SqlitePool, engine: SessionEngine) -> Ro
         .route("/api/session/{id}/skip", post(skip_session))
         .route("/api/session/{id}/hint", post(hint_session))
         .route("/api/session/{id}/next-item", post(next_item_session))
+        .route("/api/session/{id}/grade-parts", post(grade_parts_session))
         .route("/api/skips/weekly", get(weekly_skips))
         .with_state(SessionState { pool, engine })
 }

@@ -1,0 +1,387 @@
+{
+  "items": [
+    {
+      "id": "multipart-quadratics-01",
+      "skill_id": "quadratics",
+      "prompt": "The parabola y = x^2 - 5x + 6 is shown. Answer all parts.",
+      "answer": "a) (x - 2)(x - 3); b) x = 2 or x = 3; c) (5/2, -1/4)",
+      "hints": [
+        "For part (a), look for two numbers that multiply to 6 and add to -5.",
+        "For part (b), use the factorised form and the null factor law.",
+        "For part (c), complete the square or use x = -b/(2a), then substitute."
+      ],
+      "mark_scheme": {
+        "total_marks": 7,
+        "parts": {
+          "a": "Correct factorisation (2 marks)",
+          "b": "Both roots from the factorised form (2 marks)",
+          "c": "Vertex x-coordinate and y-coordinate (3 marks)"
+        }
+      },
+      "parts": [
+        {
+          "label": "a",
+          "prompt": "(a) Factorise x^2 - 5x + 6.",
+          "answer": "(x - 2)(x - 3)",
+          "answer_expr": "(x-2)*(x-3)",
+          "check": "sp.expand((x-2)*(x-3)) == x**2 - 5*x + 6",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Finds the factor pair 2 and 3", "marks": 1},
+              {"id": "m2", "description": "Writes the factorised form", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "b",
+          "prompt": "(b) Solve x^2 - 5x + 6 = 0.",
+          "answer": "x = 2 or x = 3",
+          "answer_expr": "2, 3",
+          "check": "sorted(sp.solve(x**2 - 5*x + 6, x)) == [2, 3]",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Sets each factor to zero", "marks": 1},
+              {"id": "m2", "description": "States both roots", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "c",
+          "prompt": "(c) Find the coordinates of the vertex.",
+          "answer": "(5/2, -1/4)",
+          "answer_expr": "(5/2, -1/4)",
+          "check": "sp.solve(sp.diff(x**2 - 5*x + 6, x), x) == [sp.Rational(5, 2)] and (x**2 - 5*x + 6).subs(x, sp.Rational(5, 2)) == sp.Rational(-1, 4)",
+          "marks": 3,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Uses x = -b/(2a) or completes the square", "marks": 1},
+              {"id": "m2", "description": "Finds x = 5/2", "marks": 1},
+              {"id": "m3", "description": "Finds y = -1/4 and writes the pair", "marks": 1}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "multipart-trigonometry-01",
+      "skill_id": "trigonometry",
+      "prompt": "From a point 40 m from the base of a vertical tower, the angle of elevation to the top is 32 degrees. Answer all parts, rounding lengths to 1 decimal place.",
+      "answer": "a) 25.0 m; b) 24.4 degrees; c) 15.0 m",
+      "hints": [
+        "Draw the right triangle and label the side opposite the angle.",
+        "Use tan(angle) = opposite / adjacent.",
+        "For part (c), the 45 degree angle means the distance from the base equals the height."
+      ],
+      "mark_scheme": {
+        "total_marks": 6,
+        "parts": {
+          "a": "Sets up tan(32) and solves for height (2 marks)",
+          "b": "Uses atan with the height from (a) (2 marks)",
+          "c": "Uses the 45 degree equality and subtracts (2 marks)"
+        }
+      },
+      "parts": [
+        {
+          "label": "a",
+          "prompt": "(a) Find the height of the tower to 1 decimal place.",
+          "answer": "25.0 m",
+          "answer_expr": "40*tan(32*pi/180)",
+          "check": "abs(float(40*sp.tan(32*sp.pi/180)) - 24.99) < 0.02",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Writes tan(32) = h/40", "marks": 1},
+              {"id": "m2", "description": "Evaluates and rounds to 25.0 m", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "b",
+          "prompt": "(b) Find the angle of elevation from a point 55 m from the base, to 1 decimal place.",
+          "answer": "24.4 degrees",
+          "answer_expr": "atan(40*tan(32*pi/180)/55)",
+          "check": "abs(float(sp.atan(40*sp.tan(32*sp.pi/180)/55)*180/sp.pi) - 24.44) < 0.05",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Uses tan(theta) = height/55", "marks": 1},
+              {"id": "m2", "description": "Converts to degrees and rounds", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "c",
+          "prompt": "(c) How much closer to the tower must the point be for the angle of elevation to be 45 degrees?",
+          "answer": "15.0 m",
+          "answer_expr": "40 - 40*tan(32*pi/180)",
+          "check": "abs(40 - float(40*sp.tan(32*sp.pi/180)) - 15.01) < 0.02",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "States the 45 degree distance equals the height", "marks": 1},
+              {"id": "m2", "description": "Subtracts from 40 m and rounds", "marks": 1}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "multipart-volume-01",
+      "skill_id": "volume-prism-cylinder",
+      "prompt": "A solid is made by placing a cylinder of radius 3 cm and height 8 cm on top of a rectangular prism 6 cm by 6 cm by 4 cm. Answer all parts.",
+      "answer": "a) 144 cm^3; b) 72 pi cm^3; c) 370.19 cm^3",
+      "hints": [
+        "Work out each volume separately before adding.",
+        "The prism volume is length times width times height.",
+        "The cylinder volume is pi times radius squared times height; keep pi exact until the final total."
+      ],
+      "mark_scheme": {
+        "total_marks": 7,
+        "parts": {
+          "a": "Prism volume (2 marks)",
+          "b": "Cylinder volume in terms of pi (2 marks)",
+          "c": "Adds both and rounds (3 marks)"
+        }
+      },
+      "parts": [
+        {
+          "label": "a",
+          "prompt": "(a) Find the volume of the rectangular prism.",
+          "answer": "144 cm^3",
+          "answer_expr": "6*6*4",
+          "check": "6*6*4 == 144",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Substitutes 6, 6 and 4 into V = lwh", "marks": 1},
+              {"id": "m2", "description": "States 144 cm^3", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "b",
+          "prompt": "(b) Find the volume of the cylinder in terms of pi.",
+          "answer": "72 pi cm^3",
+          "answer_expr": "72*pi",
+          "check": "sp.simplify(sp.pi*3**2*8 - 72*sp.pi) == 0",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Uses V = pi r^2 h with r = 3, h = 8", "marks": 1},
+              {"id": "m2", "description": "States 72 pi cm^3", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "c",
+          "prompt": "(c) Find the total volume to 2 decimal places.",
+          "answer": "370.19 cm^3",
+          "answer_expr": "144 + 72*pi",
+          "check": "abs(float(144 + 72*sp.pi) - 370.1947) < 0.01",
+          "marks": 3,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Adds the two volumes", "marks": 1},
+              {"id": "m2", "description": "Evaluates pi numerically", "marks": 1},
+              {"id": "m3", "description": "Rounds to 2 decimal places with units", "marks": 1}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "multipart-probability-01",
+      "skill_id": "probability",
+      "prompt": "A bag contains 5 red and 3 blue counters. Two counters are drawn without replacement. Answer all parts as fractions in simplest form.",
+      "answer": "a) 5/14; b) 15/28; c) 25/28",
+      "hints": [
+        "The denominator changes after the first counter is removed.",
+        "For different colours, consider red then blue and blue then red.",
+        "At least one red is the complement of both counters being blue."
+      ],
+      "mark_scheme": {
+        "total_marks": 7,
+        "parts": {
+          "a": "Product of the two red probabilities (2 marks)",
+          "b": "Both colour orders added (2 marks)",
+          "c": "Complement of two blues (3 marks)"
+        }
+      },
+      "parts": [
+        {
+          "label": "a",
+          "prompt": "(a) Find P(both counters are red).",
+          "answer": "5/14",
+          "answer_expr": "5/14",
+          "check": "sp.Rational(5,8)*sp.Rational(4,7) == sp.Rational(5,14)",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Uses 5/8 then 4/7", "marks": 1},
+              {"id": "m2", "description": "Simplifies to 5/14", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "b",
+          "prompt": "(b) Find P(the counters are different colours).",
+          "answer": "15/28",
+          "answer_expr": "15/28",
+          "check": "2*sp.Rational(5,8)*sp.Rational(3,7) == sp.Rational(15,28)",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Includes red-blue and blue-red orders", "marks": 1},
+              {"id": "m2", "description": "Simplifies to 15/28", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "c",
+          "prompt": "(c) Find P(at least one counter is red).",
+          "answer": "25/28",
+          "answer_expr": "25/28",
+          "check": "1 - sp.Rational(3,8)*sp.Rational(2,7) == sp.Rational(25,28)",
+          "marks": 3,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Uses the complement of no reds", "marks": 1},
+              {"id": "m2", "description": "Finds P(two blues) = 3/28", "marks": 1},
+              {"id": "m3", "description": "Subtracts and states 25/28", "marks": 1}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "multipart-financial-01",
+      "skill_id": "financial-mathematics",
+      "prompt": "8000 dollars is invested at 4.5 percent per annum compounded annually. Answer all parts.",
+      "answer": "a) 8736.20 dollars; b) 736.20 dollars; c) 6 years",
+      "hints": [
+        "Use A = P(1 + r)^n with r as a decimal.",
+        "Interest earned is the final balance minus the principal.",
+        "For part (c), test whole numbers of years; do not round up a fractional answer blindly."
+      ],
+      "mark_scheme": {
+        "total_marks": 7,
+        "parts": {
+          "a": "Compound interest formula for 2 years (2 marks)",
+          "b": "Final balance minus principal (2 marks)",
+          "c": "Correct whole-year inequality (3 marks)"
+        }
+      },
+      "parts": [
+        {
+          "label": "a",
+          "prompt": "(a) Find the balance after 2 years, to the nearest cent.",
+          "answer": "8736.20 dollars",
+          "answer_expr": "8000*(1.045)**2",
+          "check": "abs(float(8000*(1.045)**2) - 8736.20) < 0.005",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Substitutes into A = P(1 + r)^n", "marks": 1},
+              {"id": "m2", "description": "Rounds to 8736.20 dollars", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "b",
+          "prompt": "(b) Find the interest earned over the 2 years.",
+          "answer": "736.20 dollars",
+          "answer_expr": "8000*((1.045)**2 - 1)",
+          "check": "abs(float(8000*((1.045)**2 - 1)) - 736.20) < 0.005",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Subtracts the principal from the balance", "marks": 1},
+              {"id": "m2", "description": "States 736.20 dollars", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "c",
+          "prompt": "(c) Find the smallest whole number of years for the balance to exceed 10000 dollars.",
+          "answer": "6 years",
+          "answer_expr": "6",
+          "check": "8000*(1.045)**5 < 10000 and 8000*(1.045)**6 > 10000",
+          "marks": 3,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Sets up 8000(1.045)^n > 10000", "marks": 1},
+              {"id": "m2", "description": "Tests 5 years and 6 years", "marks": 1},
+              {"id": "m3", "description": "Concludes 6 whole years", "marks": 1}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "multipart-index-laws-01",
+      "skill_id": "index-laws",
+      "prompt": "Answer all parts, showing index-law working.",
+      "answer": "a) 4; b) 27x^6; c) x = 11/4",
+      "hints": [
+        "Add indices when multiplying powers with the same base, subtract when dividing.",
+        "Raise every factor inside the bracket to the power outside.",
+        "Rewrite 9 and 27 as powers of 3 before equating indices."
+      ],
+      "mark_scheme": {
+        "total_marks": 7,
+        "parts": {
+          "a": "Index laws combined (2 marks)",
+          "b": "Power of a product (2 marks)",
+          "c": "Common base and solve (3 marks)"
+        }
+      },
+      "parts": [
+        {
+          "label": "a",
+          "prompt": "(a) Simplify (2^3 x 2^4) / 2^5.",
+          "answer": "4",
+          "answer_expr": "(2**3*2**4)/2**5",
+          "check": "(2**3*2**4)/2**5 == 4",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Adds indices then subtracts", "marks": 1},
+              {"id": "m2", "description": "Evaluates 2^2 = 4", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "b",
+          "prompt": "(b) Expand (3x^2)^3.",
+          "answer": "27x^6",
+          "answer_expr": "27*x**6",
+          "check": "sp.expand((3*x**2)**3) == 27*x**6",
+          "marks": 2,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Cubes the coefficient 3", "marks": 1},
+              {"id": "m2", "description": "Multiplies the index 2 by 3", "marks": 1}
+            ]
+          }
+        },
+        {
+          "label": "c",
+          "prompt": "(c) Solve 9^(x+1) = 27^(2x-3).",
+          "answer": "x = 11/4",
+          "answer_expr": "11/4",
+          "check": "9**(sp.Rational(11,4)+1) == 27**(2*sp.Rational(11,4)-3)",
+          "marks": 3,
+          "rubric": {
+            "method": [
+              {"id": "m1", "description": "Rewrites 9 and 27 as powers of 3", "marks": 1},
+              {"id": "m2", "description": "Equates the indices", "marks": 1},
+              {"id": "m3", "description": "Solves to x = 11/4", "marks": 1}
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

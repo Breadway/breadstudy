@@ -75,6 +75,60 @@ async fn seed_bank(pool: &SqlitePool) {
     .unwrap();
 }
 
+async fn seed_one_item(pool: &SqlitePool) {
+    sqlx::query("INSERT INTO skills(id, strand, name, vault_note) VALUES(?,?,?,?)")
+        .bind("solo-skill")
+        .bind("Geometry")
+        .bind("Solo skill")
+        .bind("Area Volume and Surface Area")
+        .execute(pool)
+        .await
+        .unwrap();
+    let hints = serde_json::json!([
+        "first hint for solo-item",
+        "first hint for solo-item. Name the rule before substituting.",
+        "first hint for solo-item. Name the rule before substituting. Check units."
+    ])
+    .to_string();
+    sqlx::query(
+        "INSERT INTO items(id, skill_id, prompt, answer, hints, status) \
+         VALUES('solo-item','solo-skill','Only prompt','42',?,'verified')",
+    )
+    .bind(hints)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_multipart(pool: &SqlitePool, item_id: &str) {
+    sqlx::query("UPDATE items SET mark_scheme = 'total 6 marks' WHERE id = ?")
+        .bind(item_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let parts = [
+        ("a", "(a) State the value.", "42", 2.0, r#"["method","answer"]"#),
+        ("b", "(b) Halve it.", "7", 2.0, r#"["method","answer"]"#),
+        ("c", "(c) Subtract seven.", "0", 2.0, r#"["method","answer"]"#),
+    ];
+    for (ordinal, (label, prompt, answer, marks, rubric)) in parts.into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO item_parts(item_id, label, ordinal, prompt, answer, marks, rubric) \
+             VALUES(?,?,?,?,?,?,?)",
+        )
+        .bind(item_id)
+        .bind(label)
+        .bind(ordinal as i64)
+        .bind(prompt)
+        .bind(answer)
+        .bind(marks)
+        .bind(rubric)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
 fn cleanup(db: &str) {
     let _ = std::fs::remove_file(db);
 }
@@ -275,13 +329,14 @@ async fn weekend_template_has_correct_durations_and_break_placement() {
 }
 
 #[tokio::test]
-async fn skip_logs_reason_uses_grace_and_reports_weekly_count() {
+async fn skip_consumes_the_item_stays_in_phase_then_advances() {
     let (pool, db) = test_pool("skip").await;
     seed_bank(&pool).await;
 
     let started = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
         .await
         .unwrap();
+    let first_item = started.item.as_ref().expect("recall item").id.clone();
     let first = session::skip(&pool, &started.id, "felt unwell", t0())
         .await
         .unwrap()
@@ -289,20 +344,182 @@ async fn skip_logs_reason_uses_grace_and_reports_weekly_count() {
     assert!(first.grace_used);
     assert_eq!(first.session.grace_tokens, 0);
     assert_eq!(first.weekly_skip_count, 1);
-    assert_eq!(first.session.phase, Phase::Practice, "skip re-plans");
+    assert_eq!(first.session.phase, Phase::Recall, "skip stays in phase");
+    let second_item = first.session.item.as_ref().expect("next recall item");
+    assert_ne!(second_item.id, first_item, "skip consumes the item");
+    assert_eq!(
+        first.session.phase_items[1].remaining, 1,
+        "one recall item is left after the skip"
+    );
 
+    // Recall caches two items; the second skip exhausts it and advances.
     let second = session::skip(&pool, &started.id, "needed a break", t0())
         .await
         .unwrap()
         .expect("session");
     assert!(!second.grace_used);
     assert_eq!(second.weekly_skip_count, 2);
+    assert_eq!(second.session.phase, Phase::Practice);
 
     let events = session::events(&pool, &started.id).await.unwrap();
     let skips: Vec<_> = events.iter().filter(|event| event.kind == "skip").collect();
     assert_eq!(skips.len(), 2);
     assert_eq!(skips[0].detail["reason"], "felt unwell");
+    assert_eq!(skips[0].detail["stayed_in_phase"], true);
+    assert_eq!(skips[0].detail["skipped_item_id"], first_item.as_str());
     assert_eq!(skips[1].detail["reason"], "needed a break");
+    assert_eq!(skips[1].detail["stayed_in_phase"], false);
+    cleanup(&db);
+}
+
+#[tokio::test]
+async fn explain_keeps_the_practised_item_and_its_last_answer() {
+    let (pool, db) = test_pool("explain-continuity").await;
+    seed_bank(&pool).await;
+
+    let started = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    let practice = session::advance(&pool, &started.id, t0())
+        .await
+        .unwrap()
+        .expect("session");
+    assert_eq!(practice.phase, Phase::Practice);
+    let practice_item = practice.item.as_ref().expect("practice item").id.clone();
+
+    session::grade(
+        &pool,
+        &started.id,
+        AttemptInput {
+            item_id: practice_item.clone(),
+            input_kind: "typed".into(),
+            given: "42".into(),
+            correct: true,
+            session_id: None,
+            error_tags: vec![],
+            attempt_id: None,
+        },
+        t0(),
+    )
+    .await
+    .unwrap()
+    .expect("graded");
+
+    let explain = session::advance(&pool, &started.id, t0())
+        .await
+        .unwrap()
+        .expect("session");
+    assert_eq!(explain.phase, Phase::Explain);
+    let item = explain.item.as_ref().expect("explain item");
+    assert_eq!(item.id, practice_item, "explain continues the practised item");
+    assert_eq!(item.teach_answer.as_deref(), Some("42"));
+    assert_eq!(explain.hint_unlocked, 0, "the graded rep reset the ladder");
+    cleanup(&db);
+}
+
+#[tokio::test]
+async fn session_view_reports_per_phase_cached_counts() {
+    let (pool, db) = test_pool("counts").await;
+    seed_bank(&pool).await;
+
+    let started = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    assert_eq!(started.cached_items_total, 7);
+    assert_eq!(started.cached_items_remaining, 7);
+    let recall = started
+        .phase_items
+        .iter()
+        .find(|count| count.phase == Phase::Recall)
+        .expect("recall count");
+    assert_eq!((recall.total, recall.remaining), (2, 2));
+
+    let next = session::next_item(&pool, &started.id, t0())
+        .await
+        .unwrap()
+        .expect("session");
+    assert_eq!(next.cached_items_remaining, 6);
+    let recall = next
+        .phase_items
+        .iter()
+        .find(|count| count.phase == Phase::Recall)
+        .expect("recall count");
+    assert_eq!((recall.total, recall.remaining), (2, 1));
+
+    let practice = session::advance(&pool, &started.id, t0())
+        .await
+        .unwrap()
+        .expect("session");
+    let practice_count = practice
+        .phase_items
+        .iter()
+        .find(|count| count.phase == Phase::Practice)
+        .expect("practice count");
+    assert_eq!((practice_count.total, practice_count.remaining), (3, 3));
+    assert_eq!(practice.cached_items_remaining, 3 + 2);
+    cleanup(&db);
+}
+
+#[tokio::test]
+async fn multi_part_item_is_exposed_and_graded_part_by_part() {
+    let (pool, db) = test_pool("multipart").await;
+    seed_bank(&pool).await;
+    seed_multipart(&pool, "item-00").await;
+
+    let started = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    let item = started.item.as_ref().expect("recall item");
+    assert_eq!(item.id, "item-00");
+    assert_eq!(item.parts.len(), 3);
+    assert_eq!(item.parts[0].label, "a");
+    assert_eq!(item.parts[0].marks, 2.0);
+    assert!(item.parts[0].prompt.contains("(a)"));
+    assert_eq!(item.mark_scheme.as_deref(), Some("total 6 marks"));
+
+    let graded = session::grade_parts(
+        &pool,
+        &started.id,
+        session::MultiPartRequest {
+            item_id: "item-00".into(),
+            parts: vec![
+                session::PartAnswer {
+                    label: "a".into(),
+                    given: "42".into(),
+                },
+                session::PartAnswer {
+                    label: "b".into(),
+                    given: "7".into(),
+                },
+                session::PartAnswer {
+                    label: "c".into(),
+                    given: "1".into(),
+                },
+            ],
+        },
+        t0(),
+    )
+    .await
+    .unwrap()
+    .expect("graded");
+    assert_eq!(graded.total_marks, 6.0);
+    assert_eq!(graded.awarded_marks, 4.0);
+    assert!(!graded.correct);
+    assert_eq!(graded.parts.len(), 3);
+    assert!(graded.parts[0].correct);
+    assert!(graded.parts[1].correct);
+    assert!(!graded.parts[2].correct);
+    assert_eq!(graded.attempt.skill_id, "volume-prism-cylinder");
+    assert_eq!(graded.session.item.as_ref().unwrap().id, "item-00");
+
+    let events = session::events(&pool, &started.id).await.unwrap();
+    let attempt = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "attempt")
+        .expect("attempt event");
+    assert_eq!(attempt.detail["awarded_marks"], 4.0);
+    assert_eq!(attempt.detail["total_marks"], 6.0);
     cleanup(&db);
 }
 
@@ -374,7 +591,8 @@ async fn hints_are_unlocked_from_cache_and_items_can_advance() {
 #[tokio::test]
 async fn hint_progress_is_isolated_between_session_runs() {
     let (pool, db) = test_pool("hint-isolation").await;
-    seed_bank(&pool).await;
+    // One item, so both runs must serve it even with recency selection.
+    seed_one_item(&pool).await;
 
     let first = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
         .await
@@ -691,6 +909,163 @@ async fn fsrs_engine_prefers_due_low_mastery_skills_and_rotates_items() {
         "consecutive sessions must not replay the same item set"
     );
 
+    cleanup(&db);
+}
+
+fn equal_due(_skill_id: &str) -> Option<f64> {
+    Some(1.0)
+}
+
+async fn seed_fixture_bank(pool: &SqlitePool) -> Vec<serde_json::Value> {
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../scripts/multipart_items.json"
+    ))
+    .expect("read multi-part fixtures");
+    let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid fixture JSON");
+    let items = fixtures["items"].as_array().expect("items array").clone();
+    for item in &items {
+        let skill_id = item["skill_id"].as_str().expect("skill_id");
+        sqlx::query("INSERT OR IGNORE INTO skills(id, strand, name, vault_note) VALUES(?,?,?,?)")
+            .bind(skill_id)
+            .bind("Methods")
+            .bind(skill_id)
+            .bind("fixture")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO items(id, skill_id, prompt, answer, rubric, hints, mark_scheme, status) \
+             VALUES(?,?,?,?,?,?,?,'verified')",
+        )
+        .bind(item["id"].as_str().expect("id"))
+        .bind(skill_id)
+        .bind(item["prompt"].as_str().expect("prompt"))
+        .bind(item["answer"].as_str().expect("answer"))
+        .bind(r#"{"method":[],"final":{"marks":0,"answer":"fixture"}}"#)
+        .bind(item["hints"].to_string())
+        .bind(item["mark_scheme"].to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        for (ordinal, part) in item["parts"].as_array().expect("parts").iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO item_parts(item_id, label, ordinal, prompt, answer, marks, rubric) \
+                 VALUES(?,?,?,?,?,?,?)",
+            )
+            .bind(item["id"].as_str().expect("id"))
+            .bind(part["label"].as_str().expect("label"))
+            .bind(ordinal as i64)
+            .bind(part["prompt"].as_str().expect("part prompt"))
+            .bind(part["answer"].as_str().expect("part answer"))
+            .bind(part["marks"].as_f64().expect("marks"))
+            .bind(part["rubric"].to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+    items
+}
+
+#[tokio::test]
+async fn every_multipart_fixture_grades_to_full_marks_end_to_end() {
+    let (pool, db) = test_pool("fixtures").await;
+    let items = seed_fixture_bank(&pool).await;
+    assert!(items.len() >= 5, "at least five multi-part fixtures");
+
+    let started = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    assert_eq!(
+        started.cached_items_total,
+        items.len(),
+        "every fixture is cached into the session"
+    );
+
+    for item in &items {
+        let item_id = item["id"].as_str().expect("id");
+        let parts: Vec<session::PartAnswer> = item["parts"]
+            .as_array()
+            .expect("parts")
+            .iter()
+            .map(|part| session::PartAnswer {
+                label: part["label"].as_str().expect("label").to_string(),
+                given: part["answer"].as_str().expect("answer").to_string(),
+            })
+            .collect();
+        let graded = session::grade_parts(
+            &pool,
+            &started.id,
+            session::MultiPartRequest {
+                item_id: item_id.to_string(),
+                parts,
+            },
+            t0(),
+        )
+        .await
+        .unwrap()
+        .expect("fixture graded");
+        assert!(
+            graded.correct,
+            "{item_id} must score every part: {}/{}",
+            graded.awarded_marks, graded.total_marks
+        );
+        assert_eq!(
+            graded.awarded_marks, graded.total_marks,
+            "{item_id} fixture answers must match their parts"
+        );
+        let scheme_total = item["mark_scheme"]["total_marks"]
+            .as_f64()
+            .expect("mark scheme total");
+        assert_eq!(
+            f64::from(graded.total_marks),
+            scheme_total,
+            "{item_id} mark scheme total matches its parts"
+        );
+    }
+    cleanup(&db);
+}
+
+#[tokio::test]
+async fn recency_prefers_unserved_items_with_due_order_still_primary() {
+    let (pool, db) = test_pool("recency").await;
+    seed_bank(&pool).await;
+
+    let mut options = StartOptions::new(Template::SchoolDay20);
+    options.engine = SessionEngine::with_due_score(equal_due);
+    let first = session::start(&pool, options, t0()).await.unwrap();
+    let first_ids = content_ids(&pool, &first.id).await;
+
+    let mut second_options = StartOptions::new(Template::SchoolDay20);
+    second_options.engine = SessionEngine::with_due_score(equal_due);
+    let second = session::start(&pool, second_options, t0()).await.unwrap();
+    let second_ids = content_ids(&pool, &second.id).await;
+
+    let all: Vec<String> = (0..12).map(|index| format!("item-{index:02}")).collect();
+    let unserved: Vec<&String> = all.iter().filter(|id| !first_ids.contains(id)).collect();
+    assert_eq!(unserved.len(), 5, "seven of twelve items were cached first");
+    for id in &unserved {
+        assert!(
+            second_ids.contains(id),
+            "second session must serve the unserved item {id}"
+        );
+    }
+
+    // Once the same items are old, only the least-recently-served fallback
+    // can pick them again. Due order remains the primary key: every skill
+    // here has the same score, so this checks recency and rotation only.
+    let mut late_options = StartOptions::new(Template::SchoolDay20);
+    late_options.engine = SessionEngine::with_due_score(equal_due);
+    let late = session::start(&pool, late_options, at(8 * 24 * 60 * 60))
+        .await
+        .unwrap();
+    let late_ids = content_ids(&pool, &late.id).await;
+    assert_eq!(late_ids.len(), 7);
+    assert!(
+        late_ids.iter().any(|id| first_ids.contains(id)),
+        "after seven days the oldest items become eligible again"
+    );
     cleanup(&db);
 }
 
