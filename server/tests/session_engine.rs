@@ -916,6 +916,117 @@ fn equal_due(_skill_id: &str) -> Option<f64> {
     Some(1.0)
 }
 
+async fn seed_fixture_bank(pool: &SqlitePool) -> Vec<serde_json::Value> {
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../scripts/multipart_items.json"
+    ))
+    .expect("read multi-part fixtures");
+    let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid fixture JSON");
+    let items = fixtures["items"].as_array().expect("items array").clone();
+    for item in &items {
+        let skill_id = item["skill_id"].as_str().expect("skill_id");
+        sqlx::query("INSERT OR IGNORE INTO skills(id, strand, name, vault_note) VALUES(?,?,?,?)")
+            .bind(skill_id)
+            .bind("Methods")
+            .bind(skill_id)
+            .bind("fixture")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO items(id, skill_id, prompt, answer, rubric, hints, mark_scheme, status) \
+             VALUES(?,?,?,?,?,?,?,'verified')",
+        )
+        .bind(item["id"].as_str().expect("id"))
+        .bind(skill_id)
+        .bind(item["prompt"].as_str().expect("prompt"))
+        .bind(item["answer"].as_str().expect("answer"))
+        .bind(r#"{"method":[],"final":{"marks":0,"answer":"fixture"}}"#)
+        .bind(item["hints"].to_string())
+        .bind(item["mark_scheme"].to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+        for (ordinal, part) in item["parts"].as_array().expect("parts").iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO item_parts(item_id, label, ordinal, prompt, answer, marks, rubric) \
+                 VALUES(?,?,?,?,?,?,?)",
+            )
+            .bind(item["id"].as_str().expect("id"))
+            .bind(part["label"].as_str().expect("label"))
+            .bind(ordinal as i64)
+            .bind(part["prompt"].as_str().expect("part prompt"))
+            .bind(part["answer"].as_str().expect("part answer"))
+            .bind(part["marks"].as_f64().expect("marks"))
+            .bind(part["rubric"].to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+    items
+}
+
+#[tokio::test]
+async fn every_multipart_fixture_grades_to_full_marks_end_to_end() {
+    let (pool, db) = test_pool("fixtures").await;
+    let items = seed_fixture_bank(&pool).await;
+    assert!(items.len() >= 5, "at least five multi-part fixtures");
+
+    let started = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    assert_eq!(
+        started.cached_items_total,
+        items.len(),
+        "every fixture is cached into the session"
+    );
+
+    for item in &items {
+        let item_id = item["id"].as_str().expect("id");
+        let parts: Vec<session::PartAnswer> = item["parts"]
+            .as_array()
+            .expect("parts")
+            .iter()
+            .map(|part| session::PartAnswer {
+                label: part["label"].as_str().expect("label").to_string(),
+                given: part["answer"].as_str().expect("answer").to_string(),
+            })
+            .collect();
+        let graded = session::grade_parts(
+            &pool,
+            &started.id,
+            session::MultiPartRequest {
+                item_id: item_id.to_string(),
+                parts,
+            },
+            t0(),
+        )
+        .await
+        .unwrap()
+        .expect("fixture graded");
+        assert!(
+            graded.correct,
+            "{item_id} must score every part: {}/{}",
+            graded.awarded_marks, graded.total_marks
+        );
+        assert_eq!(
+            graded.awarded_marks, graded.total_marks,
+            "{item_id} fixture answers must match their parts"
+        );
+        let scheme_total = item["mark_scheme"]["total_marks"]
+            .as_f64()
+            .expect("mark scheme total");
+        assert_eq!(
+            f64::from(graded.total_marks),
+            scheme_total,
+            "{item_id} mark scheme total matches its parts"
+        );
+    }
+    cleanup(&db);
+}
+
 #[tokio::test]
 async fn recency_prefers_unserved_items_with_due_order_still_primary() {
     let (pool, db) = test_pool("recency").await;
