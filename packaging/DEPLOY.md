@@ -102,6 +102,21 @@ docker run --rm --name studyseed-runner \
 It prints a JSON report per Practice set. Re-running is idempotent; answers
 that fail the SymPy gate stay `review_required` instead of being silently fixed.
 
+## Generate more practice items
+
+`scripts/generate_items.py` asks the model for original problems per skill,
+verifies `answer_expr` with SymPy, attaches one SearXNG source and inserts them:
+
+```sh
+docker run --rm --network host --entrypoint python3 \
+  -v breadstudy_breadstudy-data:/var/lib/breadstudy \
+  -v /home/breadway/.config/breadstudy/opencode-go.key:/etc/breadstudy/llm.key:ro \
+  breadstudy:local /app/scripts/generate_items.py --per-skill 4
+```
+
+`--network host` is required because SearXNG binds loopback on the host.
+Without a source, items are stored as `review_required` rather than verified.
+
 ## Edge
 
 Hestia Caddy (LAN) and Aegis (public) reverse-proxy `study.breadway.dev` to host port 7220; blocks live in the infra repo. Set `BREADSTUDY_BIND=0.0.0.0:7220` in `.env` so the Tailscale path can reach it. BIPS id `breadstudy-web-prod`.
