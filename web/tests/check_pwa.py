@@ -49,7 +49,7 @@ def main():
 
     session = (WEB / "session.html").read_text()
     for token in ('rel="manifest"', "session-timer", "hint-list", "hint-btn",
-                  "scratch-preview", "scratch-input", 'type="file"', "voice-btn",
+                  "latex-preview", "next-question-btn", "skip-btn", 'type="file"',
                   "latex-answer", "phase-row", "capture="):
         if token not in session:
             ok = fail("session.html missing " + token) and False
@@ -83,8 +83,8 @@ def main():
         ok = fail("sample Volume/SA latex missing") and False
 
     # 360px check: camera and mic controls must sort before other answers on narrow screens.
-    if "#photo-input-label" not in css or "#voice-btn" not in css:
-        ok = fail("phone CSS must keep camera and mic reachable") and False
+    if "#photo-input-label" not in css:
+        ok = fail("phone CSS must keep the camera reachable") and False
 
     print("PASS" if ok else "CHECKS FAILED")
     return 0 if ok else 1

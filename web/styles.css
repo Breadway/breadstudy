@@ -138,5 +138,5 @@ footer { padding: 24px 16px; color: var(--muted); text-align: center; }
   .timer { font-size: 1.7rem; }
   nav.tabs a { padding: 10px 12px; }
   .answer-grid { position: relative; }
-  #photo-input-label, #voice-btn { order: -1; }
+  #photo-input-label { order: -1; }
 }
