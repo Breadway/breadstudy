@@ -96,6 +96,10 @@ textarea, input[type="text"] {
 .board-latex { overflow-x: auto; padding: 6px 0; }
 .board-svg { display: flex; justify-content: center; padding: 6px 0; }
 .board-svg svg { max-width: 100%; height: auto; max-height: 260px; }
+#grade-feedback { display: grid; gap: 6px; margin-top: 8px; }
+#grade-feedback p { margin: 0; }
+.grade.ok { color: #7ad48a; font-weight: 600; }
+.grade.bad { color: #e8896f; font-weight: 600; }
 #scratch-preview {
   min-height: 88px;
   border: 1px solid var(--line);
