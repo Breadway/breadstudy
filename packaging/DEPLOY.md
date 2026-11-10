@@ -109,18 +109,10 @@ long-running embedding services (llama-server MiniLM on 7310, embed-shim on
 rows are registered in PORTS.md; an INFRA issue tracks them. Do not enable
 the unit on any port until the registry confirms the assignment.
 
-## Teaching mode speech backends
+## Teaching mode speech setup
 
-The teaching page is served at `/teach.html`. Its audio layer talks to
-`POST /api/tts`, which resolves a backend in this order:
-
-1. Kokoro, when the local sidecar on loopback port 7314 answers.
-2. Gemini, when `BREADSTUDY_GEMINI_API_KEY` or its key file is configured.
-3. Breeze, when the breeze broker is already running on loopback port 7312.
-4. Otherwise the route answers 503 with `"fallback": "browser"`, and the page
-   uses the Web Speech API.
-
-Every successful response carries `X-Breadstudy-TTS-Backend` and
+The teaching page is served at `/teach.html` and uses the backend order
+above. Every successful response carries `X-Breadstudy-TTS-Backend` and
 `X-Breadstudy-TTS-Voice` so the UI can show what actually served the clip.
 The page requests one sentence at a time and prefetches the next sentence
 while the current one plays. The Gemini public TTS API returns whole clips
@@ -138,16 +130,10 @@ enabling it:
 ss -ltn 'sport = :7314'
 ```
 
-Model weights are about 340 MB and are not committed to this public repo.
-Download them outside the checkout, then install the Python dependency in a
-venv:
+Download the two model files with the commands above, then install the
+Python dependency in a venv:
 
 ```sh
-install -d -m 750 /var/lib/breadstudy/tts
-curl -L -o /var/lib/breadstudy/tts/kokoro-v1.0.onnx \
-  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
-curl -L -o /var/lib/breadstudy/tts/voices-v1.0.bin \
-  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 python3 -m venv ~/.local/share/breadstudy/kokoro-venv
 ~/.local/share/breadstudy/kokoro-venv/bin/pip install -r packaging/tts/requirements.txt
 ```
