@@ -24,6 +24,10 @@ const MAX_BLOCKS: usize = 24;
 const MAX_TEXT: usize = 4000;
 const MAX_SVG: usize = 20_000;
 const MAX_LATEX: usize = 2000;
+const MAX_ANIMATION_FRAMES: usize = 8;
+const MIN_FRAME_MS: u32 = 200;
+const MAX_FRAME_MS: u32 = 3000;
+const MAX_CAPTION: usize = 160;
 
 /// The skill a teaching turn is scoped to. It is resolved from the index so
 /// the model is told the student's real topic and the reply can name it.
@@ -47,6 +51,42 @@ pub struct Block {
     pub items: Option<Vec<String>>,
     #[serde(default)]
     pub svg: Option<String>,
+    /// Frame sequence for `kind: "animation"`. Omitted from text, latex,
+    /// steps and svg blocks so their shape is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Vec<Frame>>,
+}
+
+/// One frame of an animation block. Each frame is a complete inline SVG that
+/// continues the previous frame, so the client can swap them in place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Frame {
+    pub svg: String,
+    #[serde(default)]
+    pub caption: Option<String>,
+    #[serde(default, deserialize_with = "de_optional_ms")]
+    pub duration_ms: Option<u32>,
+}
+
+/// Models sometimes send `900.0` or `"900"`. A strict u32 would reject the
+/// whole board, so accept anything numeric and let the clamp decide.
+fn de_optional_ms<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let ms = match value {
+        Some(serde_json::Value::Number(number)) => number.as_f64(),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    Ok(ms.and_then(|ms| {
+        if ms.is_finite() && ms >= 0.0 {
+            Some(ms.round().min(u32::MAX as f64) as u32)
+        } else {
+            None
+        }
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,9 +242,10 @@ Return ONLY JSON: {\"blocks\":[...]} where each block is one of:\n\
 {\"kind\":\"latex\",\"latex\":\"...\"}  (one display equation, no surrounding $$)\n\
 {\"kind\":\"steps\",\"items\":[\"...\",\"...\"]}\n\
 {\"kind\":\"svg\",\"svg\":\"<svg viewBox=...>...</svg>\"}\n\
-Rules: 4 to 12 blocks, short prose, at most 2 equations, at most 1 SVG. The SVG must be a self-contained diagram using only svg, g, path, line, rect, circle, ellipse, polygon, polyline, text, tspan, marker, defs and marker elements, with viewBox set and no scripts, styles, images, foreignObject, event attributes or external references. Label diagrams with <text>. Prefer showing the shape and the substitution over restating the formula.";
+{\"kind\":\"animation\",\"frames\":[{\"svg\":\"<svg viewBox=...>...</svg>\",\"caption\":\"...\",\"duration_ms\":900}]}\n\
+Rules: 4 to 12 blocks, short prose, at most 2 equations, at most 1 SVG or animation. Use an animation when motion explains the idea: unrolling a cylinder into a rectangle, sweeping a radius around a circle, rotating a triangle, or shifting a graph. An animation needs 3 to 6 frames that all use the same fixed viewBox and the same shapes, each frame continuing the previous picture instead of redrawing it from scratch. Give every frame a short caption of a few words and a duration_ms between 400 and 1500. The SVG must be a self-contained diagram using only svg, g, path, line, rect, circle, ellipse, polygon, polyline, text, tspan, marker, defs and marker elements, with viewBox set and no scripts, styles, images, foreignObject, event attributes or external references. Label diagrams with <text>. Prefer showing the shape and the substitution over restating the formula.";
 
-/// Server-side gate. Anything that fails a rule is dropped rather than
+/// The server-side gate. Anything that fails a rule is dropped rather than
 /// rendered, and an all-dropped board is an error so the UI can say so.
 pub fn sanitize_blocks(blocks: Vec<Block>) -> Vec<Block> {
     blocks
@@ -220,6 +261,7 @@ pub fn sanitize_blocks(blocks: Vec<Block>) -> Vec<Block> {
                     latex: None,
                     items: None,
                     svg: None,
+                    frames: None,
                 })
             }
             "latex" => {
@@ -230,6 +272,7 @@ pub fn sanitize_blocks(blocks: Vec<Block>) -> Vec<Block> {
                     latex: Some(truncate(&latex, MAX_LATEX)),
                     items: None,
                     svg: None,
+                    frames: None,
                 })
             }
             "steps" => {
@@ -249,6 +292,7 @@ pub fn sanitize_blocks(blocks: Vec<Block>) -> Vec<Block> {
                             .collect(),
                     ),
                     svg: None,
+                    frames: None,
                 })
             }
             "svg" => {
@@ -262,11 +306,70 @@ pub fn sanitize_blocks(blocks: Vec<Block>) -> Vec<Block> {
                     latex: None,
                     items: None,
                     svg: Some(truncate(&svg, MAX_SVG)),
+                    frames: None,
                 })
             }
+            "animation" => sanitize_animation(block),
             _ => None,
         })
         .collect()
+}
+
+/// An animation is all-or-nothing. Every candidate frame must pass the same
+/// gate as a static SVG, otherwise the sequence is dropped and the first
+/// usable frame is shown as a plain diagram so the board still renders.
+fn sanitize_animation(block: Block) -> Option<Block> {
+    let candidates: Vec<Frame> = block
+        .frames
+        .unwrap_or_default()
+        .into_iter()
+        .take(MAX_ANIMATION_FRAMES)
+        .collect();
+    let mut valid: Vec<Frame> = Vec::new();
+    let mut all_valid = !candidates.is_empty();
+    for frame in candidates {
+        match sanitize_frame(frame) {
+            Some(frame) => valid.push(frame),
+            None => all_valid = false,
+        }
+    }
+    if valid.is_empty() {
+        return None;
+    }
+    if all_valid {
+        return Some(Block {
+            kind: "animation".into(),
+            text: None,
+            latex: None,
+            items: None,
+            svg: None,
+            frames: Some(valid),
+        });
+    }
+    let first = valid.remove(0);
+    Some(Block {
+        kind: "svg".into(),
+        text: None,
+        latex: None,
+        items: None,
+        svg: Some(first.svg),
+        frames: None,
+    })
+}
+
+fn sanitize_frame(frame: Frame) -> Option<Frame> {
+    if frame.svg.len() > MAX_SVG || !is_safe_svg(&frame.svg) {
+        return None;
+    }
+    let caption = frame
+        .caption
+        .map(|caption| truncate(caption.trim(), MAX_CAPTION))
+        .filter(|caption| !caption.is_empty());
+    Some(Frame {
+        svg: frame.svg,
+        caption,
+        duration_ms: frame.duration_ms.map(|ms| ms.clamp(MIN_FRAME_MS, MAX_FRAME_MS)),
+    })
 }
 
 /// Conservative check: the payload must look like a single inline SVG and
@@ -458,5 +561,122 @@ mod tests {
         ]);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].text.as_ref().map(|t| t.len()), Some(MAX_TEXT));
+    }
+
+    #[test]
+    fn keeps_animation_frames_and_clamps_durations() {
+        let blocks = sanitize_blocks(vec![block(
+            r#"{"kind":"animation","frames":[
+                {"svg":"<svg viewBox=\"0 0 10 10\"><rect width=\"4\" height=\"10\"/></svg>","caption":"Start","duration_ms":10},
+                {"svg":"<svg viewBox=\"0 0 10 10\"><rect width=\"7\" height=\"10\"/></svg>","caption":"Half","duration_ms":900},
+                {"svg":"<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>","caption":"Unrolled","duration_ms":9000}
+            ]}"#,
+        )]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, "animation");
+        let frames = blocks[0].frames.as_ref().expect("frames");
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].duration_ms, Some(MIN_FRAME_MS));
+        assert_eq!(frames[1].duration_ms, Some(900));
+        assert_eq!(frames[2].duration_ms, Some(MAX_FRAME_MS));
+        assert_eq!(frames[2].caption.as_deref(), Some("Unrolled"));
+    }
+
+    #[test]
+    fn caps_animation_frames_at_eight() {
+        let frame = r#"{"svg":"<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>"}"#;
+        let frames = [frame; 11].join(",");
+        let blocks = sanitize_blocks(vec![block(&format!(
+            r#"{{"kind":"animation","frames":[{frames}]}}"#
+        ))]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].frames.as_ref().map(Vec::len), Some(MAX_ANIMATION_FRAMES));
+    }
+
+    #[test]
+    fn unsafe_frame_falls_back_to_first_valid_static_svg() {
+        let blocks = sanitize_blocks(vec![block(
+            r#"{"kind":"animation","frames":[
+                {"svg":"<svg viewBox=\"0 0 10 10\"><rect width=\"4\" height=\"10\"/></svg>","caption":"Start"},
+                {"svg":"<svg onload=\"alert(1)\"></svg>","caption":"Evil"},
+                {"svg":"<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>","caption":"End"}
+            ]}"#,
+        )]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, "svg");
+        assert!(blocks[0].frames.is_none());
+        let svg = blocks[0].svg.as_deref().expect("svg");
+        assert!(svg.contains("width=\"4\""));
+        assert!(!svg.contains("alert"));
+    }
+
+    #[test]
+    fn animation_with_no_valid_frame_is_dropped() {
+        let blocks = sanitize_blocks(vec![block(
+            r#"{"kind":"animation","frames":[
+                {"svg":"<svg onload=\"alert(1)\"></svg>"},
+                {"svg":"<svg><script>alert(1)</script></svg>"}
+            ]}"#,
+        )]);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn board_parses_animation_and_tolerates_numeric_strings() {
+        let board: Board = serde_json::from_str(
+            r#"{"blocks":[
+                {"kind":"text","text":"Unrolling the label"},
+                {"kind":"animation","frames":[
+                    {"svg":"<svg viewBox=\"0 0 10 10\"><rect width=\"4\" height=\"10\"/></svg>","caption":"Cylinder","duration_ms":900.0},
+                    {"svg":"<svg viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>","caption":"Rectangle","duration_ms":"1200"}
+                ]}
+            ]}"#,
+        )
+        .expect("board");
+        assert_eq!(board.blocks.len(), 2);
+        let frames = board.blocks[1].frames.as_ref().expect("frames");
+        assert_eq!(frames[0].duration_ms, Some(900));
+        assert_eq!(frames[1].duration_ms, Some(1200));
+    }
+
+    #[test]
+    fn legacy_block_shape_has_no_frames_key() {
+        let blocks = sanitize_blocks(vec![
+            block(r#"{"kind":"text","text":"hello"}"#),
+            block(r#"{"kind":"svg","svg":"<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>"}"#),
+        ]);
+        for block in blocks {
+            let json = serde_json::to_value(&block).expect("json");
+            assert!(
+                json.get("frames").is_none(),
+                "legacy block gained a frames key: {json}"
+            );
+            assert!(json.get("kind").is_some());
+            assert!(json.get("text").is_some());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "live model call; needs BREADSTUDY_LLM_API_KEY_FILE"]
+    async fn live_cylinder_animation() {
+        let client = TeachClient::from_env().expect("teach client");
+        let blocks = client
+            .explain(
+                "Show me a cylinder unrolling into a rectangle, as an animation.",
+                None,
+                &[],
+                None,
+                "",
+            )
+            .await
+            .expect("live teach reply");
+        println!(
+            "LIVE_BLOCKS={}",
+            serde_json::to_string(&blocks).expect("json")
+        );
+        assert!(
+            blocks.iter().any(|block| block.kind == "animation"),
+            "model returned no animation block: {blocks:?}"
+        );
     }
 }

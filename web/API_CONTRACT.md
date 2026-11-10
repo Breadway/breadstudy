@@ -41,9 +41,14 @@ Base URL: the deployed origin. All bodies are JSON unless stated.
 
 ## Teaching
 
-- `POST /api/teach` `{ question, item_id?, history?: [{ role, content }] }` ->
-  `{ blocks: [{ kind: "text" | "latex" | "steps" | "svg", ... }] }`.
+- `POST /api/teach` `{ question, item_id?, history?: [{ role, content }], skill_id?, transcript? }` ->
+  `{ blocks: [{ kind: "text" | "latex" | "steps" | "svg" | "animation", ... }], skill? }`.
   SVG is sanitized server-side; blocks are length-capped.
+- An animation block is `{ kind: "animation", frames: [{ svg, caption?, duration_ms? }] }`,
+  capped at 8 frames with each SVG held to the same sanitizer and size cap as a
+  static diagram. Durations clamp to 200-3000 ms; the client defaults to 900 ms.
+  If any frame fails sanitization the block is downgraded to a single static
+  `svg` block built from the first usable frame.
 
 ## Notes for clients
 
