@@ -945,25 +945,6 @@ function logLocal(kind, payload) {
 function bindAnswerInputs() {
   const latex = document.getElementById("latex-answer");
   if (latex) latex.addEventListener("input", refreshAnswerPreview);
-  const voiceBtn = document.getElementById("voice-btn");
-  const voiceStatus = document.getElementById("voice-status");
-  if (voiceBtn) {
-    voiceBtn.addEventListener("click", async () => {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        if (voiceStatus) voiceStatus.textContent = "Mic not available on this device.";
-        return;
-      }
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        if (voiceStatus) voiceStatus.textContent = "Mic ready. Recording is handled by the session service.";
-        stream.getTracks().forEach((t) => t.stop());
-        logLocal("voice-input", { ok: true });
-      } catch (e) {
-        if (voiceStatus) voiceStatus.textContent = "Mic blocked. You can still type or take a photo.";
-        logLocal("voice-input", { ok: false });
-      }
-    });
-  }
   const photo = document.getElementById("photo-input");
   const photoStatus = document.getElementById("photo-status");
   if (photo) {
@@ -1001,13 +982,49 @@ function bindSessionControls() {
     });
   }
   const skip = document.getElementById("skip-btn");
-  if (skip) skip.addEventListener("click", () => {
-    const reason = prompt("One-line skip reason (required):", "");
-    if (reason && reason.trim()) {
-      logLocal("skip", { reason: reason.trim() });
-      advancePhase();
+  if (skip) skip.addEventListener("click", skipItem);
+}
+
+async function skipItem() {
+  const reason = window.prompt("One-line skip reason (required):", "");
+  if (!reason || !reason.trim()) {
+    setSessionStatus("Skip needs a one-line reason. Nothing was skipped.");
+    return;
+  }
+  if (!sessionState.serverMode || !sessionState.sessionId) {
+    setSessionStatus("Skip needs the session server. Nothing was skipped.");
+    return;
+  }
+  const trimmed = reason.trim();
+  const beforePhase = currentPhase();
+  const beforeItem = sessionState.item ? sessionState.item.id : null;
+  const btn = document.getElementById("skip-btn");
+  if (btn) btn.disabled = true;
+  try {
+    const outcome = await postJson("/api/session/" + sessionState.sessionId + "/skip", { reason: trimmed });
+    if (outcome.session) applyServerView(outcome.session);
+    const samePhase = currentPhase() === beforePhase;
+    const sameItem = sessionState.item ? sessionState.item.id : null;
+    if (samePhase && sameItem === beforeItem) {
+      // Older servers advanced the phase without moving within it. Pull the
+      // next cached item so a skip still skips one question.
+      const view = await postJson("/api/session/" + sessionState.sessionId + "/next-item", {});
+      applyServerView(view);
     }
-  });
+    const weekly = Number.isFinite(outcome.weekly_skip_count)
+      ? " Weekly skips: " + outcome.weekly_skip_count + "."
+      : "";
+    setSessionStatus(
+      "Skipped: " + trimmed + "." + weekly +
+      (samePhase ? "" : " The server moved the session to " + currentPhase() + ".")
+    );
+    logLocal("skip", { reason: trimmed, weekly_skip_count: outcome.weekly_skip_count, phase: currentPhase() });
+  } catch (e) {
+    setSessionStatus("Could not record the skip: " + e.message);
+    logLocal("skip-failed", { reason: trimmed, error: String(e) });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function renderDashboard() {
@@ -1101,5 +1118,6 @@ window.BreadstudySession = {
   photoTargetSize,
   nextQuestion,
   syncSession,
-  setIdleState
+  setIdleState,
+  skipItem
 };
