@@ -26,7 +26,10 @@ fn build_router(pool: SqlitePool, web_dir: PathBuf) -> anyhow::Result<Router> {
     let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::skills_router(pool.clone()))
-        .merge(api::session_router(pool.clone()))
+        .merge(api::session_router_with_engine(
+            pool.clone(),
+            breadstudy_server::session::SessionEngine::fsrs(),
+        ))
         .merge(planner::router(pool.clone()))
         .merge(api::fsrs_routes().with_state(pool.clone()))
         .merge(api::grading_router(grading));

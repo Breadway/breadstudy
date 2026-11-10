@@ -16,6 +16,8 @@
 //! The ladder text lives in `items.hints`; only the cursor lives in the
 //! `hint_state` table.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -837,6 +839,16 @@ pub async fn due_score(pool: &sqlx::SqlitePool, skill_id: &str) -> anyhow::Resul
         }
         None => UNSEEN_DUE_SCORE,
     })
+}
+
+/// Due score for every skill keyed by id, for a synchronous selection pass
+/// that has already loaded its items.
+pub async fn due_score_map(pool: &sqlx::SqlitePool) -> anyhow::Result<HashMap<String, f64>> {
+    Ok(due_skills(pool)
+        .await?
+        .into_iter()
+        .map(|skill| (skill.skill_id, skill.due_score))
+        .collect())
 }
 
 /// Every skill in planner order, overdue and weak skills first.
