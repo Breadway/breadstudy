@@ -165,3 +165,40 @@ footer { padding: 24px 16px; color: var(--muted); text-align: center; }
   .answer-grid { position: relative; }
   #photo-input-label { order: -1; }
 }
+
+/* Progress surface (STUDY-42) */
+.pattern-line { margin: 0 0 6px 0; }
+.pattern-line strong { color: var(--accent); }
+.attempt-list li.attempt { display: grid; gap: 4px; }
+.attempt-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.verdict {
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+.verdict-correct { color: var(--ok); border-color: var(--ok); }
+.verdict-partial { color: #e6c07b; border-color: #e6c07b; }
+.verdict-incorrect { color: #e8896f; border-color: #e8896f; }
+.attempt-skill { color: var(--muted); }
+.attempt-prompt { margin: 0; white-space: pre-line; }
+.attempt-marks, .attempt-time { margin: 0; font-size: 0.9rem; }
+.tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 0; }
+.tag {
+  font-size: 0.78rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+}
+.mastery-list li.mastery { display: grid; gap: 6px; }
+.mastery-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.mastery-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: #100e0c;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.mastery-fill { height: 100%; background: var(--accent); }

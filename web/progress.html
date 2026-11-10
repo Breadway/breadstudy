@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#141210">
+<title>breadstudy progress</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<header class="topbar">
+<div class="brand">breadstudy progress</div>
+<nav class="tabs" aria-label="Primary">
+<a href="./index.html">Dashboard</a>
+<a href="./session.html">Session</a>
+<a href="./progress.html" aria-current="page">Progress</a>
+</nav>
+</header>
+<div id="offline-banner" class="offline-banner" role="status" hidden></div>
+<main>
+<section class="card" aria-labelledby="pattern-h">
+<h2 id="pattern-h">Recurring error pattern</h2>
+<p id="top-pattern" class="muted">Loading attempt history.</p>
+</section>
+
+<section class="card" aria-labelledby="attempts-h">
+<h2 id="attempts-h">Recent attempts</h2>
+<p id="attempt-summary" class="muted">Loading attempts.</p>
+<ul class="clean attempt-list" id="attempt-list">
+<li class="muted">Loading attempts.</li>
+</ul>
+</section>
+
+<section class="card" aria-labelledby="mastery-h">
+<h2 id="mastery-h">Skill mastery and next due</h2>
+<p class="muted">Mastery comes from the server scheduler. Due dates are when the next review is scheduled.</p>
+<ul class="clean mastery-list" id="mastery-list">
+<li class="muted">Loading mastery.</li>
+</ul>
+</section>
+</main>
+<footer>Read straight from the server: attempts, scheduler and error patterns. Nothing here is a device-local sample.</footer>
+<script defer src="./progress.js"></script>
+</body>
+</html>
