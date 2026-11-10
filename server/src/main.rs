@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::{routing::get, Router};
+use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::{routing::get, Json, Router};
 use breadstudy_server::{api, db, grading::GradingService, planner, static_web};
 use sqlx::SqlitePool;
 use tracing_subscriber::EnvFilter;
@@ -9,6 +13,28 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_LISTEN: &str = "0.0.0.0:7290";
 const DEFAULT_DATABASE_PATH: &str = "/var/lib/breadstudy/breadstudy.db";
 const DEFAULT_WEB_DIR: &str = "/srv/breadstudy-web";
+/// A phone photo arrives base64-encoded inside JSON, so the raw request is
+/// larger than the image. 8 MB accepts a resized photo with headroom while
+/// keeping an unbounded body off the server.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Replace axum's bare 413 text with an actionable JSON error the PWA can
+/// show. The status stays 413 so clients can still branch on it.
+async fn clarify_payload_too_large(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "Upload is too large. The server accepts request bodies up to 8 MB; resize the photo and retry.",
+                "max_body_bytes": MAX_BODY_BYTES,
+            })),
+        )
+            .into_response();
+    }
+    response
+}
 
 /// Build the application router around a live SQLite pool.
 ///
@@ -63,7 +89,12 @@ fn build_router(pool: SqlitePool, web_dir: PathBuf) -> anyhow::Result<Router> {
                     async move { static_web::serve(root, Some(path)).await }
                 }
             }),
-        ))
+        )
+        // DefaultBodyLimit wraps the extractors; the clarify layer sits
+        // inside it so a rejection produced by Json still gets the JSON
+        // message instead of axum's plain-text buffer error.
+        .layer(middleware::from_fn(clarify_payload_too_large))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES)))
 }
 
 #[tokio::main]
