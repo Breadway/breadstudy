@@ -512,7 +512,12 @@ pub fn read_api_key() -> anyhow::Result<String> {
 }
 
 fn is_loopback_url(base_url: &str) -> bool {
-    base_url.contains("127.0.0.1") || base_url.contains("localhost") || base_url.contains("[::1]")
+    // host.docker.internal is the host itself from inside the container, so a
+    // llama.cpp endpoint reached that way is still a local, keyless endpoint.
+    base_url.contains("127.0.0.1")
+        || base_url.contains("localhost")
+        || base_url.contains("[::1]")
+        || base_url.contains("host.docker.internal")
 }
 
 fn is_config_error(error: &anyhow::Error) -> bool {
@@ -610,7 +615,7 @@ impl HttpGrader {
         let body = json!({
             "model": endpoint.model,
             "temperature": 0.0,
-            "max_tokens": 1200,
+            "max_tokens": 2000,
             "messages": [
                 {"role": "system", "content": "You are a precise maths marker. Return only JSON."},
                 {"role": "user", "content": user_content}
@@ -654,7 +659,15 @@ impl HttpGrader {
                 .filter_map(|part| part.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join(""),
-            _ => anyhow::bail!("model {} returned no message content", endpoint.model),
+            _ => {
+                let finish = envelope["choices"][0]["finish_reason"]
+                    .as_str()
+                    .unwrap_or("unknown");
+                anyhow::bail!(
+                    "model {} returned no message content (finish_reason={finish})",
+                    endpoint.model
+                )
+            }
         };
         let json_text = extract_json(&content).ok_or_else(|| {
             anyhow::anyhow!(
@@ -1267,7 +1280,7 @@ fn strip_units(text: &str) -> String {
 }
 
 fn numbers(text: &str) -> Vec<f64> {
-    let text = strip_units(&normalize_grouping(&text));
+    let text = strip_units(&normalize_grouping(text));
     let chars: Vec<char> = text.chars().collect();
     let mut values = Vec::new();
     let mut index = 0;
