@@ -117,3 +117,48 @@ async fn boots_and_serves_healthz_and_planner() {
         "the PWA shell should be served at /, got: {html:.80}"
     );
 }
+
+#[tokio::test]
+async fn accepts_phone_sized_bodies_and_explains_oversized_ones() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+
+    // 3 MB of base64-ish text is what a compressed phone photo looks like
+    // after JSON encoding. It must reach the handler rather than 413.
+    let accepted = serde_json::json!({
+        "item_id": "missing-item",
+        "input_kind": "latex",
+        "latex": "x".repeat(3 * 1024 * 1024),
+    });
+    let response = client
+        .post(format!("{}/api/attempts", server.base))
+        .json(&accepted)
+        .send()
+        .await
+        .expect("POST a 3 MB attempt");
+    assert_ne!(
+        response.status(),
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+        "the 8 MB limit must accept a phone-sized photo"
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let oversized = serde_json::json!({
+        "item_id": "missing-item",
+        "input_kind": "latex",
+        "latex": "x".repeat(9 * 1024 * 1024),
+    });
+    let response = client
+        .post(format!("{}/api/attempts", server.base))
+        .json(&oversized)
+        .send()
+        .await
+        .expect("POST an oversized attempt");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    let body: serde_json::Value = response.json().await.expect("JSON 413 body");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("8 MB"),
+        "the 413 must explain the limit, got: {message}"
+    );
+}
