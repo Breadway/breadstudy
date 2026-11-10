@@ -101,12 +101,120 @@ Port registry note: propose these PORTS.md rows in the infra repo
 
 `| 7312 | 127.0.0.1 | breadstudy-tts-prod | ai-inference | breeze-server TTS broker, loopback only |`
 `| 7313 | 127.0.0.1 | breadstudy-tts-upstream-prod | ai-inference | upstream Breeze TTS server, loopback only |`
+`| 7314 | 127.0.0.1 | breadstudy-kokoro-tts | ai-inference | Kokoro ONNX TTS sidecar, loopback only |`
 
 Known conflicts 2026-11-09: the first-choice ports 7310 and 7311 are held by
 long-running embedding services (llama-server MiniLM on 7310, embed-shim on
 7311), and the 7307 fallback is held by opencode-go-proxy. None of these
 rows are registered in PORTS.md; an INFRA issue tracks them. Do not enable
 the unit on any port until the registry confirms the assignment.
+
+## Teaching mode speech setup
+
+The teaching page is served at `/teach.html` and uses the backend order
+above. Every successful response carries `X-Breadstudy-TTS-Backend` and
+`X-Breadstudy-TTS-Voice` so the UI can show what actually served the clip.
+The page requests one sentence at a time and prefetches the next sentence
+while the current one plays. The Gemini public TTS API returns whole clips
+rather than a stream, so per-sentence requests are the latency strategy. The
+same sentence pipeline and barge-in path are used for Kokoro, Gemini, Breeze
+and browser speech.
+
+### Kokoro sidecar (default, local CPU)
+
+The sidecar is `packaging/tts/kokoro_server.py` and binds loopback only.
+Port 7314 is the default because 7310 and 7311 are occupied. Check before
+enabling it:
+
+```sh
+ss -ltn 'sport = :7314'
+```
+
+Download the two model files with the commands above, then install the
+Python dependency in a venv:
+
+```sh
+python3 -m venv ~/.local/share/breadstudy/kokoro-venv
+~/.local/share/breadstudy/kokoro-venv/bin/pip install -r packaging/tts/requirements.txt
+```
+
+Install and start the user unit:
+
+```sh
+cp packaging/tts/breadstudy-kokoro-tts.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now breadstudy-kokoro-tts
+curl -s http://127.0.0.1:7314/healthz
+curl -s -o /tmp/kokoro-check.wav -w '%{http_code} %{time_starttransfer}\n' \
+  -X POST http://127.0.0.1:7314/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"Area equals pi r squared.","voice":"bm_george","speed":1.0}'
+```
+
+The service lazy-loads the model on the first request and keeps it warm. It
+serializes synthesis, caps input at 1200 characters, and refuses a
+non-loopback bind address.
+
+Container note: compose sets `BREADSTUDY_KOKORO_TTS_URL` to
+`http://host.docker.internal:7314` because the sidecar runs on the host. A
+host binary uses the default `http://127.0.0.1:7314`. The sidecar binds
+loopback only, so a plain Docker bridge container cannot reach it through
+`host.docker.internal` unless you deliberately run a forwarder on the Docker
+gateway. If you keep the sidecars loopback-only, run the breadstudy server as
+a host binary for teaching mode, or accept that the page falls back to browser
+speech. The same caveat applies to the Breeze broker on 7312.
+
+### Gemini quality fallback
+
+Gemini is used only when a key exists. The key is never baked into the image
+or logged. The supported path is a host file mounted read-only:
+
+```sh
+install -d -m 700 ~/.config/breadstudy
+install -m 600 /dev/null ~/.config/breadstudy/gemini.key
+$EDITOR ~/.config/breadstudy/gemini.key
+```
+
+Then uncomment the Gemini volume line in `packaging/compose.yaml` and
+recreate the container. For a host binary, set
+`BREADSTUDY_GEMINI_API_KEY_FILE` to that path. The key is read at startup, so
+restart after adding it.
+
+| Variable | Default |
+|---|---|
+| `BREADSTUDY_GEMINI_API_KEY` | unset; direct environment value, avoid in compose |
+| `BREADSTUDY_GEMINI_API_KEY_FILE` | `/etc/breadstudy/gemini.key` |
+| `BREADSTUDY_GEMINI_TTS_MODEL` | `gemini-2.5-flash-preview-tts` |
+
+The route maps the request voice onto the Gemini voice set and returns WAV.
+If Gemini is selected but unconfigured or upstream fails, the route answers
+503 and the page falls back to browser speech instead of going silent.
+
+### Breeze quality fallback
+
+Breeze is explicit. The route uses the broker on
+`BREADSTUDY_BREEZE_TTS_URL` (default `http://127.0.0.1:7312`) only when it is
+already running; it never starts the broker and never unloads or restarts the
+llama router. Start it yourself when the GPU is free:
+
+```sh
+cargo build --release
+cp packaging/breeze-server.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now breeze-server
+curl -s http://127.0.0.1:7312/healthz
+```
+
+The Breeze request uses the "patient coach" voice design: a calm,
+encouraging male mentor with an Australian accent, speaking slowly and
+precisely. If the broker is up but its GPU upstream is down, it answers with
+silent fallback audio; the route treats that as unavailable and the page uses
+browser speech, because silent audio is not teaching.
+
+In the teaching page, choose **Speech: Breeze (GPU)** from the backend
+selector to use it. Auto only reaches Breeze after Kokoro and Gemini have both
+failed. Expect the GPU broker to pause or contend with the llama router while
+it synthesizes; that trade-off is deliberate and never automatic.
 
 ## Seed the item bank
 

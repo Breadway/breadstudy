@@ -25,11 +25,21 @@ services:
       BREADSTUDY_LLM_FALLBACK_BASE_URL: "${BREADSTUDY_LLM_FALLBACK_BASE_URL:-http://host.docker.internal:7301/v1}"
       BREADSTUDY_LLM_FALLBACK_MODELS: "${BREADSTUDY_LLM_FALLBACK_MODELS:-Ornith-1.5-9B-Q4_K_M,LFM3-Omni-2B-Q4_K_M}"
       BREADSTUDY_LLM_MIN_CONFIDENCE: "${BREADSTUDY_LLM_MIN_CONFIDENCE:-0.75}"
+      # Teaching mode speech. The sidecars/brokers default to loopback on the
+      # host. A plain bridge container cannot reach loopback through
+      # host.docker.internal; these values assume you deliberately run a
+      # forwarder on the Docker gateway. A host binary uses 127.0.0.1.
+      BREADSTUDY_KOKORO_TTS_URL: "${BREADSTUDY_KOKORO_TTS_URL:-http://host.docker.internal:7314}"
+      BREADSTUDY_BREEZE_TTS_URL: "${BREADSTUDY_BREEZE_TTS_URL:-http://host.docker.internal:7312}"
+      BREADSTUDY_GEMINI_API_KEY_FILE: "${BREADSTUDY_GEMINI_API_KEY_FILE:-/etc/breadstudy/gemini.key}"
     volumes:
       - breadstudy-data:/var/lib/breadstudy
       # Read-only runtime secret. The image never copies a key; the host file
       # stays outside the repo because this repository is public.
       - "${BREADSTUDY_LLM_KEY_HOST_PATH:-/home/breadway/.config/breadstudy/opencode-go.key}:/etc/breadstudy/llm.key:ro"
+      # Optional: uncomment after creating ~/.config/breadstudy/gemini.key to
+      # enable the Gemini speech quality fallback. Do not put the key in .env.
+      # - "${BREADSTUDY_GEMINI_KEY_HOST_PATH:-/home/breadway/.config/breadstudy/gemini.key}:/etc/breadstudy/gemini.key:ro"
 
   litestream:
     image: litestream/litestream:0.3.13

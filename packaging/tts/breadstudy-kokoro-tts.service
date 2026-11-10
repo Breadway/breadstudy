@@ -1,0 +1,19 @@
+[Unit]
+Description=breadstudy Kokoro TTS sidecar (local, loopback only)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/breadstudy
+Environment=KOKORO_HOST=127.0.0.1
+Environment=KOKORO_PORT=7314
+Environment=KOKORO_MODEL=/var/lib/breadstudy/tts/kokoro-v1.0.onnx
+Environment=KOKORO_VOICES=/var/lib/breadstudy/tts/voices-v1.0.bin
+Environment=KOKORO_LOG_LEVEL=INFO
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/share/breadstudy/kokoro-venv/bin/python %h/breadstudy/packaging/tts/kokoro_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

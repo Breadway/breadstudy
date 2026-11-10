@@ -1,5 +1,5 @@
 /* breadstudy PWA shell. No build step. */
-const CACHE = "breadstudy-v18";
+const CACHE = "breadstudy-v19";
 const SHELL = [
   "./index.html",
   "./session.html",
@@ -10,6 +10,9 @@ const SHELL = [
   "./styles.css",
   "./app.js",
   "./scratchpad.js",
+  "./teach.html",
+  "./teach.js",
+  "./teach.css",
   "./manifest.webmanifest"
 ];
 

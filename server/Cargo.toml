@@ -29,6 +29,7 @@ uuid.workspace = true
 reqwest.workspace = true
 axum.workspace = true
 sqlx.workspace = true
+base64 = "0.22"
 
 [dev-dependencies]
 tokio-tungstenite = "0.26"
