@@ -13,74 +13,124 @@
 </head>
 <body>
 <header class="topbar">
-<div class="brand">breadstudy session</div>
+<div class="topbar-row">
+<a class="brand" href="./index.html" aria-label="breadstudy dashboard">
+<span class="brand-mark" aria-hidden="true">b</span>
+<span class="brand-text">breadstudy</span>
+</a>
 <nav class="tabs" aria-label="Primary">
 <a href="./index.html">Dashboard</a>
 <a href="./session.html" aria-current="page">Session</a>
 <a href="./progress.html">Progress</a>
+<a href="./teach.html">Teach</a>
 </nav>
+</div>
+<div class="sessionbar" id="sessionbar" hidden>
+<div class="sb-main">
+<span class="sb-phase" id="phase-label">Ready</span>
+<span class="timer" id="session-timer">--:--</span>
+<span class="sb-item" id="item-counter">No session</span>
+</div>
+<button id="next-question-btn" class="btn primary sm" type="button" disabled>Next question</button>
+</div>
+<span id="timer-announce" class="sr-only" aria-live="polite"></span>
 </header>
 <div id="offline-banner" class="offline-banner" role="status" hidden></div>
+<p id="session-status" class="statusline" role="status"></p>
 <main>
-<section class="card" aria-labelledby="phase-h">
-<h2 id="phase-h">Phase and timer</h2>
-<p id="phase-label" class="muted">Ready to start</p>
-<div class="phase-row" id="phase-row" aria-label="Session phases"></div>
-<div class="timer-row">
-<div class="timer" id="session-timer" aria-live="polite">--:--</div>
-<button id="start-btn" class="primary" type="button">Start 20 min</button>
-<button id="next-question-btn" type="button">Next question</button>
-<button id="next-phase-btn" type="button">Next phase</button>
-<button id="skip-btn" type="button">Skip with reason</button>
-</div>
-<p id="session-status" class="muted" role="status"></p>
-</section>
-<section class="card" aria-labelledby="item-h">
-<h2 id="item-h">Current item</h2>
-<p id="item-prompt">A cylinder has radius 3 cm and height 7 cm. Find its volume.</p>
-<p id="item-strand" class="muted"></p>
-<div class="hint-list" id="hint-list" aria-label="Hint ladder"></div>
-<p id="hint-meta" class="muted">Hints used: 0 of 3</p>
-<button id="hint-btn" type="button">Reveal next hint</button>
-</section>
-<section class="card" aria-labelledby="scratch-h">
-<h2 id="scratch-h">Teaching board</h2>
-<div class="scratchpad">
-<p class="muted">Ask the tutor to explain or draw something. It writes here, step by step.</p>
-<div id="teach-board" aria-live="polite"></div>
-<p id="teach-status" class="muted" role="status"></p>
-<label for="teach-input">Ask a question</label>
-<textarea id="teach-input" rows="2" placeholder="e.g. show me why the cylinder volume formula works"></textarea>
-<button id="teach-btn" class="primary" type="button">Explain on the board</button>
-<p class="muted">Each question keeps its own board section. Saved explanations stay on this device; vault write-back lands later.</p>
+<section class="card hero" id="idle-card" aria-labelledby="idle-h">
+<p class="eyebrow">No session running</p>
+<h1 id="idle-h">Start a session</h1>
+<p class="muted">Pick a length. The planner pulls what is due and the timer starts with the first question.</p>
+<div class="choice-grid">
+<button id="start-20-btn" class="btn primary choice" type="button">
+<span class="choice-k">Start 20 min</span>
+<span class="choice-s">School day</span>
+</button>
+<button id="start-40-btn" class="btn choice" type="button">
+<span class="choice-k">Start 40 min</span>
+<span class="choice-s">Weekend</span>
+</button>
+<a class="btn choice" href="./teach.html">
+<span class="choice-k">Teach mode</span>
+<span class="choice-s">Ask the board</span>
+</a>
 </div>
 </section>
-<section class="card" aria-labelledby="answer-h">
-<h2 id="answer-h">Answer input</h2>
-<div class="answer-grid">
-<div>
-<label for="latex-answer">Your answer (plain text or LaTeX)</label>
-<textarea id="latex-answer" rows="2" placeholder="e.g. 63 pi cm3, or 63\pi\ \text{cm}^3"></textarea>
-<div class="symbol-row" aria-label="Insert a symbol">
-<button id="sym-pi" class="symbol-btn" type="button" aria-label="Insert pi">&#960;</button>
-<button id="sym-sqrt" class="symbol-btn" type="button" aria-label="Insert square root">&#8730;</button>
-<button id="sym-power" class="symbol-btn" type="button" aria-label="Insert a power">x&#178;</button>
+
+<section class="card qcard" id="question-card" aria-labelledby="item-h" hidden>
+<p class="eyebrow" id="item-strand"></p>
+<h1 id="item-h" class="sr-only">Current question</h1>
+<p id="item-prompt" class="q-prompt"></p>
+</section>
+
+<section class="card" id="answer-card" aria-labelledby="answer-h" hidden>
+<h2 id="answer-h">Your answer</h2>
+<label class="field-label" for="latex-answer">Your answer (plain text or LaTeX)</label>
+<textarea id="latex-answer" rows="3" placeholder="e.g. 63 pi cm3, or 63\pi\ \text{cm}^3" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+<div class="symbol-row" role="group" aria-label="Insert a symbol">
+<button id="sym-pi" class="symbol-btn" type="button" aria-label="Insert pi" title="Pi">&#960;</button>
+<button id="sym-sqrt" class="symbol-btn" type="button" aria-label="Insert square root" title="Square root">&#8730;</button>
+<button id="sym-power" class="symbol-btn" type="button" aria-label="Insert a square" title="Square">x&#178;</button>
+<button id="sym-times" class="symbol-btn" type="button" aria-label="Insert multiplication" title="Times">&#215;</button>
+<button id="sym-divide" class="symbol-btn" type="button" aria-label="Insert division" title="Divide">&#247;</button>
+<button id="sym-frac" class="symbol-btn" type="button" aria-label="Insert a fraction" title="Fraction">a/b</button>
+<button id="sym-leq" class="symbol-btn" type="button" aria-label="Insert less than or equal" title="Less than or equal">&#8804;</button>
+<button id="sym-geq" class="symbol-btn" type="button" aria-label="Insert greater than or equal" title="Greater than or equal">&#8805;</button>
+<button id="sym-deg" class="symbol-btn" type="button" aria-label="Insert degrees" title="Degrees">&#176;</button>
 </div>
-<p id="latex-preview" class="muted">Typed answer preview appears here.</p>
-</div>
-<div class="input-row">
+<p id="latex-preview" class="preview muted">Typed answer preview appears here.</p>
+<div class="answer-tools">
 <label class="file-btn" id="photo-input-label" for="photo-input">Take photo of working</label>
 <input id="photo-input" type="file" accept="image/*" capture="environment">
 </div>
-<p id="photo-status" class="muted"></p>
-<div class="input-row">
-<button id="submit-btn" class="primary" type="button">Submit answer</button>
-</div>
+<p id="photo-status" class="muted small"></p>
 <div id="grade-feedback" role="status" aria-live="polite"></div>
-</div>
 </section>
+
+<div class="action-bar" id="action-bar" hidden>
+<button id="submit-btn" class="btn primary" type="button">Submit answer</button>
+<button id="bottom-next-btn" class="btn" type="button" disabled>Next question</button>
+</div>
+
+<div class="action-bar finish-actions" id="finish-actions" hidden>
+<button id="again-20-btn" class="btn primary" type="button">New 20 min</button>
+<button id="again-40-btn" class="btn" type="button">New 40 min</button>
+</div>
+
+<details class="fold" id="hint-details" hidden>
+<summary><span>Hints</span><span class="fold-meta" id="hint-meta">Hints used: 0 of 0</span></summary>
+<div class="fold-body">
+<div class="hint-list" id="hint-list" aria-label="Hint ladder"></div>
+<button id="hint-btn" class="btn" type="button" disabled>Reveal next hint</button>
+</div>
+</details>
+
+<details class="fold" id="teach-details" hidden>
+<summary><span>Teaching board</span><span class="fold-meta">Ask the tutor</span></summary>
+<div class="fold-body">
+<div class="scratchpad">
+<div id="teach-board" aria-live="polite"></div>
+<p id="teach-status" class="muted small" role="status"></p>
+<label class="field-label" for="teach-input">Ask a question</label>
+<textarea id="teach-input" rows="2" placeholder="e.g. show me why the cylinder volume formula works"></textarea>
+<button id="teach-btn" class="btn" type="button">Explain on the board</button>
+</div>
+</div>
+</details>
+
+<details class="fold" id="controls-details" hidden>
+<summary><span>Session controls</span></summary>
+<div class="fold-body">
+<div class="phase-row" id="phase-row" aria-label="Session phases"></div>
+<div class="control-row">
+<button id="next-phase-btn" type="button">Next phase</button>
+<button id="skip-btn" type="button">Skip with reason</button>
+</div>
+</div>
+</details>
 </main>
-<footer>Soft friction only. Nothing is blocked. Escape is always available via Skip.</footer>
+<footer>Soft friction only. Nothing is blocked. Skip is always available.</footer>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script defer src="./scratchpad.js"></script>
 <script defer src="./app.js"></script>

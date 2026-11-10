@@ -13,6 +13,8 @@ const DEFAULT_PLAN = [
   { phase: "end", planned_seconds: 0 }
 ];
 const TEMPLATE_20 = { recall: 2 * 60, practice: 10 * 60, explain: 5 * 60, reflect: 3 * 60 };
+const CONTENT_PHASES = new Set(["recall", "practice", "explain"]);
+
 const ACTIVE_SESSION_KEY = "breadstudy-active-session";
 const SESSION_CACHE_KEY = "breadstudy-session-cache";
 const ATTEMPT_QUEUE_KEY = "breadstudy-attempt-queue";
@@ -70,6 +72,8 @@ let sessionState = {
   hintsUsed: 0,
   hintsUnlocked: 0,
   hintTotal: 0,
+  phaseTotal: 0,
+  phaseRemaining: 0,
   item: null,
   sessionId: null,
   template: null,
@@ -80,7 +84,8 @@ let sessionState = {
   pollId: null,
   syncInFlight: false,
   offline: false,
-  flushInFlight: false
+  flushInFlight: false,
+  marking: false
 };
 
 function readStoredSessionId() {
@@ -113,11 +118,21 @@ function persistSessionId(id) {
 }
 
 function setStartState(active) {
-  const start = document.getElementById("start-btn");
-  if (!start) return;
-  start.disabled = Boolean(active);
-  start.textContent = active ? "Session running" : "Start 20 min";
-  start.setAttribute("aria-disabled", active ? "true" : "false");
+  ["start-20-btn", "start-40-btn"].forEach((id) => {
+    const button = document.getElementById(id);
+    if (!button) return;
+    button.disabled = Boolean(active);
+    button.setAttribute("aria-disabled", active ? "true" : "false");
+  });
+}
+
+function prefersReducedMotion() {
+  return Boolean(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+function phaseLabel(phase) {
+  if (!phase) return "Ready";
+  return phase.charAt(0).toUpperCase() + phase.slice(1);
 }
 
 function setSessionStatus(message) {
@@ -177,6 +192,10 @@ function applyServerView(view, options) {
   const nextIndex = index !== undefined ? index : 0;
   const phaseChanged = nextIndex !== sessionState.phaseIndex;
   sessionState.phaseIndex = nextIndex;
+  if (phaseChanged) lastTimerAnnouncement = null;
+  const phaseInfo = Array.isArray(view.phase_items) ? view.phase_items[nextIndex] : null;
+  sessionState.phaseTotal = Number(phaseInfo && phaseInfo.total) || 0;
+  sessionState.phaseRemaining = Number(phaseInfo && phaseInfo.remaining) || 0;
   sessionState.remaining = view.phase_remaining_seconds || 0;
   const previous = sessionState.item;
   const sameItem = Boolean(previous && view.item && previous.id === view.item.id);
@@ -240,9 +259,9 @@ function applyServerView(view, options) {
   renderTimer();
   renderHints();
   renderItem();
+  renderChrome();
+  if (view.phase === "explain") openFold("teach-details");
   const finished = view.phase === "end" || Boolean(view.ended_at);
-  const nextQuestion = document.getElementById("next-question-btn");
-  if (nextQuestion) nextQuestion.disabled = finished || !sessionState.item || Boolean(explainItem);
   setStartState(!finished);
   if (finished) {
     stopTimer();
@@ -266,7 +285,7 @@ function phaseContent(phase) {
       "1. Which step felt automatic today?\n" +
       "2. Where did you lose a mark, and what will you check first next time?\n" +
       "3. What one thing should the next session start with?\n\n" +
-      "Write a short note in the answer box if you want it kept, then press Next phase.";
+      "Think it through, then press Next phase.";
   }
   if (phase === "end") {
     return "Session complete.\n" +
@@ -311,11 +330,92 @@ function renderItem() {
             : "";
     }
   } else {
-    prompt.textContent = "Press Start to pull a due item from the planner.";
+    prompt.textContent = "";
+    const strand = document.getElementById("item-strand");
+    if (strand) strand.textContent = "";
   }
 }
 
-async function startSession() {
+function openFold(id) {
+  const fold = document.getElementById(id);
+  if (fold && "open" in fold && !fold.open) fold.open = true;
+}
+
+function itemCounterText() {
+  if (sessionState.idle) return "No session";
+  const phase = currentPhase();
+  if (phase === "end") return "Session finished";
+  if (!sessionState.item) return phaseLabel(phase) + " phase";
+  if (phase === "explain") return "Explain";
+  if (sessionState.phaseTotal > 0 && sessionState.phaseRemaining > 0) {
+    const number = Math.max(1, sessionState.phaseTotal - sessionState.phaseRemaining + 1);
+    return "Item " + number + "/" + sessionState.phaseTotal;
+  }
+  const fallback = (sessionStats && Array.isArray(sessionStats.items) ? sessionStats.items.length : 0) + 1;
+  return "Item " + fallback;
+}
+
+function primaryActionState() {
+  if (sessionState.idle) return { text: "Start 20 min", disabled: false, action: "start" };
+  if (currentPhase() === "end") return { text: "Session finished", disabled: true, action: "none" };
+  const phase = currentPhase();
+  if (phase === "explain") return { text: "Next phase", disabled: false, action: "advance" };
+  if (CONTENT_PHASES.has(phase) && sessionState.item && !sessionState.phaseExhausted) {
+    return { text: "Next question", disabled: false, action: "next" };
+  }
+  return { text: "Next phase", disabled: false, action: "advance" };
+}
+
+function updateActionButtons() {
+  const state = primaryActionState();
+  const shortText = state.text === "Next question" || state.text === "Next phase" ? "Next" : state.text;
+  const top = document.getElementById("next-question-btn");
+  if (top) {
+    top.textContent = state.text;
+    top.disabled = state.disabled;
+    top.hidden = state.action === "none";
+  }
+  const bottom = document.getElementById("bottom-next-btn");
+  if (bottom) {
+    bottom.textContent = shortText;
+    bottom.disabled = state.disabled;
+  }
+}
+
+function renderChrome() {
+  const idle = sessionState.idle;
+  const ended = !idle && currentPhase() === "end";
+  document.body.classList.toggle("session-active", !idle);
+  document.body.classList.toggle("session-idle", idle);
+  const bar = document.getElementById("sessionbar");
+  if (bar) bar.hidden = idle;
+  const idleCard = document.getElementById("idle-card");
+  if (idleCard) idleCard.hidden = !idle;
+  const question = document.getElementById("question-card");
+  if (question) question.hidden = idle;
+  const answer = document.getElementById("answer-card");
+  if (answer) answer.hidden = idle || !sessionState.item;
+  const actions = document.getElementById("action-bar");
+  if (actions) actions.hidden = idle || ended;
+  const finish = document.getElementById("finish-actions");
+  if (finish) finish.hidden = !ended;
+  const hints = document.getElementById("hint-details");
+  if (hints) hints.hidden = idle || ended;
+  const teach = document.getElementById("teach-details");
+  if (teach) teach.hidden = idle;
+  const controls = document.getElementById("controls-details");
+  if (controls) controls.hidden = idle || ended;
+  const submit = document.getElementById("submit-btn");
+  if (submit) submit.disabled = idle || ended || !sessionState.item || sessionState.marking;
+  const label = document.getElementById("phase-label");
+  if (label) label.textContent = idle ? "Ready" : phaseLabel(currentPhase());
+  const counter = document.getElementById("item-counter");
+  if (counter) counter.textContent = itemCounterText();
+  updateActionButtons();
+}
+
+async function startSession(templateKey) {
+  const template = templateKey === "weekend_40" ? "weekend_40" : "school_day_20";
   if (sessionState.sessionId && currentPhase() !== "end") {
     setSessionStatus("A session is already running. Finish or end it before starting another.");
     setStartState(true);
@@ -323,10 +423,11 @@ async function startSession() {
   }
   sessionState.idle = false;
   try {
-    const view = await postJson("/api/session", { template: "school_day_20" });
+    const view = await postJson("/api/session", { template });
     applyServerView(view);
     startTimer();
-    logLocal("session-start", { template: "school_day_20", session: view.id });
+    setSessionStatus("Session started. The server owns the phase timer.");
+    logLocal("session-start", { template, session: view.id });
   } catch (e) {
     const cached = readCachedSessionView();
     if (cached) {
@@ -481,8 +582,9 @@ function addBoardSection(question, blocks, meta) {
   const body = document.createElement("div");
   body.className = "board-body";
   section.appendChild(body);
+  const reduce = prefersReducedMotion();
   (blocks || []).forEach((block, index) => {
-    if (options.immediate) addBlock(block, body);
+    if (options.immediate || reduce) addBlock(block, body);
     else setTimeout(() => addBlock(block, body), index * 120);
   });
 
@@ -507,7 +609,9 @@ function addBoardSection(question, blocks, meta) {
 
   board.appendChild(section);
   if (section.scrollIntoView) {
-    try { section.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) { /* older webview */ }
+    try {
+      section.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "nearest" });
+    } catch (e) { /* older webview */ }
   }
   return section;
 }
@@ -787,6 +891,7 @@ async function submitAnswer() {
 
   const btn = document.getElementById("submit-btn");
   if (btn) btn.disabled = true;
+  sessionState.marking = true;
   if (status) status.textContent = "Marking...";
 
   let payload = null;
@@ -872,6 +977,7 @@ async function submitAnswer() {
     sessionStats.final += Number(reply.attempt.final_marks) || 0;
     sessionStats.finalTotal += Number(reply.attempt.final_marks_total) || 0;
     saveSessionStats();
+    renderChrome();
     logLocal("graded", { item: item.id, correct: reply.attempt.correct });
   } catch (e) {
     const networkError = e && (
@@ -893,7 +999,9 @@ async function submitAnswer() {
         (pendingPhoto ? " The photo is still attached, so you can retry." : "");
     }
   } finally {
+    sessionState.marking = false;
     if (btn) btn.disabled = false;
+    renderChrome();
   }
 }
 
@@ -915,7 +1023,7 @@ function renderPhases(rootId) {
   root.innerHTML = "";
   const label = document.getElementById("phase-label");
   if (sessionState.idle) {
-    if (label) label.textContent = "Ready to start";
+    if (label) label.textContent = "Ready";
     return;
   }
   const plan = activePlan();
@@ -930,7 +1038,7 @@ function renderPhases(rootId) {
     el.textContent = phase;
     root.appendChild(el);
   });
-  if (label) label.textContent = "Phase: " + currentPhase();
+  if (label) label.textContent = phaseLabel(currentPhase());
 }
 
 function fmtClock(totalSeconds) {
@@ -939,10 +1047,35 @@ function fmtClock(totalSeconds) {
   return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
 }
 
+let lastTimerAnnouncement = null;
+
 function renderTimer() {
   const el = document.getElementById("session-timer");
   if (!el) return;
-  el.textContent = sessionState.idle ? "--:--" : fmtClock(Math.max(0, sessionState.remaining));
+  if (sessionState.idle) {
+    el.textContent = "--:--";
+    el.classList.remove("low");
+    lastTimerAnnouncement = null;
+    return;
+  }
+  const remaining = Math.max(0, sessionState.remaining);
+  el.textContent = fmtClock(remaining);
+  el.classList.toggle("low", remaining <= 60);
+  // The visible clock ticks every second; announce only at meaningful points
+  // so a screen reader is not reading a new number every second.
+  const live = document.getElementById("timer-announce");
+  if (!live) return;
+  let message = null;
+  if (remaining === 0) message = "Phase time is up.";
+  else if (remaining <= 10) message = remaining + (remaining === 1 ? " second remaining." : " seconds remaining.");
+  else if (remaining % 60 === 0) {
+    const minutes = Math.round(remaining / 60);
+    message = minutes + (minutes === 1 ? " minute remaining." : " minutes remaining.");
+  }
+  if (message && message !== lastTimerAnnouncement) {
+    live.textContent = message;
+    lastTimerAnnouncement = message;
+  }
 }
 
 function startTimer() {
@@ -1005,16 +1138,18 @@ function setIdleState() {
   sessionState.remaining = 0;
   sessionState.hintsUnlocked = 0;
   sessionState.hintTotal = 0;
+  sessionState.phaseTotal = 0;
+  sessionState.phaseRemaining = 0;
   sessionState.hintsUsed = 0;
   sessionState.phaseExhausted = false;
+  lastPractised = null;
   renderPhases("phase-row");
   renderTimer();
   renderHints();
   renderItem();
+  renderChrome();
   setStartState(false);
-  const nextQuestion = document.getElementById("next-question-btn");
-  if (nextQuestion) nextQuestion.disabled = true;
-  setSessionStatus("Ready when you are. Start a 20 minute school-day session.");
+  setSessionStatus("");
 }
 
 async function nextQuestion() {
@@ -1032,6 +1167,8 @@ async function nextQuestion() {
   }
   const btn = document.getElementById("next-question-btn");
   if (btn) btn.disabled = true;
+  const bottom = document.getElementById("bottom-next-btn");
+  if (bottom) bottom.disabled = true;
   const before = sessionState.item ? sessionState.item.id : null;
   try {
     const view = await postJson("/api/session/" + sessionState.sessionId + "/next-item", {});
@@ -1050,12 +1187,9 @@ async function nextQuestion() {
     setSessionStatus("Could not load the next question: " + e.message);
     logLocal("next-item-failed", { error: String(e) });
   } finally {
-    const current = document.getElementById("next-question-btn");
-    if (current) current.disabled = currentPhase() === "end" || !sessionState.item;
+    updateActionButtons();
   }
 }
-
-const CONTENT_PHASES = new Set(["recall", "practice", "explain"]);
 
 async function advancePhase() {
   if (sessionState.idle) {
@@ -1104,6 +1238,7 @@ async function advancePhase() {
     sessionState.remaining = Number(plan[nextIndex].planned_seconds) || TEMPLATE_20[phase] || 60;
     renderPhases("phase-row");
     renderTimer();
+    renderChrome();
     logLocal("phase", { phase });
   } else {
     stopTimer();
@@ -1213,26 +1348,41 @@ function logLocal(kind, payload) {
   } catch (e) { /* storage full or blocked, session continues */ }
 }
 
-function insertIntoAnswer(text) {
+function insertIntoAnswer(text, cursorBack) {
   const latex = document.getElementById("latex-answer");
   if (!latex) return;
   const value = latex.value || "";
   const start = Number.isFinite(latex.selectionStart) ? latex.selectionStart : value.length;
   const end = Number.isFinite(latex.selectionEnd) ? latex.selectionEnd : value.length;
   latex.value = value.slice(0, start) + text + value.slice(end);
+  const caret = start + text.length - (Number(cursorBack) || 0);
   try {
-    latex.setSelectionRange(start + text.length, start + text.length);
+    latex.setSelectionRange(caret, caret);
   } catch (e) { /* some embedded webviews do not expose selection */ }
+  latex.focus();
   refreshAnswerPreview();
 }
+
+const ANSWER_SYMBOLS = {
+  "sym-pi": { text: "\\pi " },
+  "sym-sqrt": { text: "\\sqrt{}", cursorBack: 1 },
+  "sym-power": { text: "^{2}" },
+  "sym-times": { text: "\\times " },
+  "sym-divide": { text: "\\div " },
+  "sym-frac": { text: "\\frac{}{}", cursorBack: 3 },
+  "sym-leq": { text: "\\leq " },
+  "sym-geq": { text: "\\geq " },
+  "sym-deg": { text: "^{\\circ}" }
+};
 
 function bindAnswerInputs() {
   const latex = document.getElementById("latex-answer");
   if (latex) latex.addEventListener("input", refreshAnswerPreview);
-  const symbols = { "sym-pi": "\\pi ", "sym-sqrt": "\\sqrt{}", "sym-power": "^{2}" };
-  Object.keys(symbols).forEach((id) => {
+  Object.keys(ANSWER_SYMBOLS).forEach((id) => {
     const btn = document.getElementById(id);
-    if (btn) btn.addEventListener("click", () => insertIntoAnswer(symbols[id]));
+    if (!btn) return;
+    const symbol = ANSWER_SYMBOLS[id];
+    btn.addEventListener("click", () => insertIntoAnswer(symbol.text, symbol.cursorBack));
   });
   const photo = document.getElementById("photo-input");
   const photoStatus = document.getElementById("photo-status");
@@ -1248,13 +1398,29 @@ function bindAnswerInputs() {
   }
 }
 
+function primaryAction() {
+  const state = primaryActionState();
+  if (state.action === "start") return startSession("school_day_20");
+  if (state.action === "next") return nextQuestion();
+  if (state.action === "advance") return advancePhase();
+  return undefined;
+}
+
 function bindSessionControls() {
-  const start = document.getElementById("start-btn");
-  if (start) start.addEventListener("click", startSession);
+  const start20 = document.getElementById("start-20-btn");
+  if (start20) start20.addEventListener("click", () => startSession("school_day_20"));
+  const start40 = document.getElementById("start-40-btn");
+  if (start40) start40.addEventListener("click", () => startSession("weekend_40"));
   const next = document.getElementById("next-phase-btn");
   if (next) next.addEventListener("click", advancePhase);
-  const nextQuestionBtn = document.getElementById("next-question-btn");
-  if (nextQuestionBtn) nextQuestionBtn.addEventListener("click", nextQuestion);
+  ["next-question-btn", "bottom-next-btn"].forEach((id) => {
+    const button = document.getElementById(id);
+    if (button) button.addEventListener("click", primaryAction);
+  });
+  const again20 = document.getElementById("again-20-btn");
+  if (again20) again20.addEventListener("click", () => startSession("school_day_20"));
+  const again40 = document.getElementById("again-40-btn");
+  if (again40) again40.addEventListener("click", () => startSession("weekend_40"));
   const hintBtn = document.getElementById("hint-btn");
   if (hintBtn) hintBtn.addEventListener("click", useHint);
   const teachBtn = document.getElementById("teach-btn");
@@ -1342,49 +1508,89 @@ function updateStartLink() {
   const startLink = document.getElementById("start-session-link");
   if (!startLink) return;
   const active = readStoredSessionId() || urlSessionId();
-  startLink.textContent = active ? "Resume session" : "Start session";
-  startLink.setAttribute("aria-label", active ? "Resume the session already in progress" : "Start a new session");
+  startLink.textContent = active ? "Resume session" : "Start 20 min";
+  startLink.setAttribute("aria-label", active ? "Resume the session already in progress" : "Start a new 20 minute session");
+}
+
+function weakRow(skill) {
+  const row = document.createElement("a");
+  row.className = "weak-row";
+  row.href = "./skill.html?skill=" + encodeURIComponent(skill.skill_id);
+  row.title = skill.name + " - " + Math.round((Number(skill.mastery) || 0) * 100) + "% mastery";
+  const top = document.createElement("span");
+  top.className = "weak-top";
+  const name = document.createElement("span");
+  name.className = "weak-name";
+  name.textContent = skill.name;
+  const pct = Math.round((Number(skill.mastery) || 0) * 100);
+  const value = document.createElement("span");
+  value.className = "weak-pct";
+  value.textContent = pct + "%";
+  top.appendChild(name);
+  top.appendChild(value);
+  row.appendChild(top);
+
+  const bar = document.createElement("span");
+  bar.className = "mastery-bar";
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", "100");
+  bar.setAttribute("aria-valuenow", String(pct));
+  bar.setAttribute("aria-label", skill.name + " mastery");
+  const fill = document.createElement("span");
+  fill.className = "mastery-fill";
+  fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  bar.appendChild(fill);
+  row.appendChild(bar);
+  return row;
 }
 
 async function renderDashboard() {
+  if (!document.getElementById("dash-today")) return;
   updateStartLink();
+  const dateEl = document.getElementById("dash-date");
+  if (dateEl) {
+    dateEl.textContent = new Date().toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  }
   const skills = await fetchSkills();
   const el = document.getElementById("dash-skills");
+  const skillList = document.getElementById("dash-skill-list");
   if (el) {
     if (skills.length === 0) {
       el.textContent = "No skills indexed yet. Run breadstudy-seed against the vault.";
-      const list = document.getElementById("dash-skill-list");
-      if (list) list.innerHTML = "";
+      if (skillList) skillList.innerHTML = "";
     } else {
-      const strands = [...new Set(skills.map((s) => s.strand))].sort();
-      el.textContent = skills.length + " skills indexed across " + strands.join(", ") + ".";
-      const list = document.getElementById("dash-skill-list");
-      if (list) {
-        list.innerHTML = "";
+      const strands = [...new Set(skills.map((s) => s.strand).filter(Boolean))].sort();
+      el.textContent = skills.length + " skills" + (strands.length ? " in " + strands.length + " strands" : "");
+      if (skillList) {
+        skillList.innerHTML = "";
         skills.forEach((skill) => {
           const li = document.createElement("li");
           const link = document.createElement("a");
           link.className = "skill-link";
           link.href = "./skill.html?skill=" + encodeURIComponent(skill.id);
-          link.appendChild(document.createTextNode(skill.name));
+          link.title = skill.name + (skill.strand ? " - " + skill.strand : "");
+          const name = document.createElement("span");
+          name.className = "skill-name";
+          name.textContent = skill.name;
           const strand = document.createElement("span");
-          strand.className = "muted skill-strand";
+          strand.className = "skill-strand";
           strand.textContent = skill.strand || "";
+          link.appendChild(name);
           link.appendChild(strand);
           li.appendChild(link);
-          list.appendChild(li);
+          skillList.appendChild(li);
         });
       }
     }
   }
 
-  const today = document.getElementById("dash-today");
-  if (today) today.textContent = "Today: a 20 minute school-day session. Start to pull a due skill from the planner.";
-
   let log = [];
   try {
     log = JSON.parse(localStorage.getItem("breadstudy-log") || "[]");
   } catch (e) { /* local history is best effort */ }
+  if (!Array.isArray(log)) log = [];
+  const starts = log.filter((entry) => entry.kind === "session-start");
 
   const streakEl = document.getElementById("dash-streak");
   if (streakEl) {
@@ -1392,55 +1598,84 @@ async function renderDashboard() {
     streakEl.textContent = streak + (streak === 1 ? " day" : " days");
     if (streak === 0) streakEl.title = "No consecutive session days recorded on this device yet.";
   }
+  const recentEl = document.getElementById("dash-recent");
+  if (recentEl) {
+    recentEl.textContent = starts.length
+      ? starts.length + " session" + (starts.length === 1 ? "" : "s") + " on this device"
+      : "No sessions yet";
+  }
+
+  let due = null;
+  try {
+    const response = await fetch("/api/plan/due", { headers: { accept: "application/json" } });
+    if (response.ok) {
+      const parsed = await response.json();
+      if (Array.isArray(parsed)) due = parsed;
+    }
+  } catch (e) { /* planner unavailable, fall back to local history */ }
+
+  const today = document.getElementById("dash-today");
+  if (today) {
+    if (!due) {
+      today.textContent = "The planner is unavailable right now. A session still uses cached content.";
+    } else {
+      const now = new Date();
+      const reviewed = due.filter((skill) => Number(skill.reviews) > 0);
+      const dueNow = reviewed.filter((skill) => skill.due_at && new Date(skill.due_at) <= now).length;
+      if (dueNow > 0) {
+        today.textContent = dueNow + " skill" + (dueNow === 1 ? " is" : "s are") +
+          " due for review today.";
+      } else if (reviewed.length > 0) {
+        today.textContent = "No reviews are due right now. The planner will pick the next test-relevant skill.";
+      } else {
+        today.textContent = "No mastery yet. Start a session and weak spots appear here.";
+      }
+    }
+  }
 
   const weak = document.getElementById("dash-weak");
   if (weak) {
-    try {
-      const due = await fetch("/api/plan/due", { headers: { accept: "application/json" } }).then((r) => r.json());
-      weak.innerHTML = "";
-      const reviewed = Array.isArray(due)
-        ? due.filter((skill) => Number(skill.reviews) > 0)
-        : [];
-      if (reviewed.length > 0) {
-        reviewed.slice(0, 5).forEach((skill) => {
+    weak.innerHTML = "";
+    if (!due) {
+      weak.appendChild(elNode("li", "muted", "Mastery data is unavailable right now."));
+    } else {
+      const reviewed = due
+        .filter((skill) => Number(skill.reviews) > 0)
+        .sort((a, b) => (Number(a.mastery) || 0) - (Number(b.mastery) || 0));
+      if (reviewed.length === 0) {
+        weak.appendChild(elNode("li", "muted", "No graded reviews yet. Finish a session to see weak spots."));
+      } else {
+        reviewed.slice(0, 3).forEach((skill) => {
           const li = document.createElement("li");
-          const pct = Math.round((skill.mastery || 0) * 100);
-          li.textContent = skill.name + " (" + pct + "% mastery, " + skill.reviews + " reviews)";
+          li.appendChild(weakRow(skill));
           weak.appendChild(li);
         });
-      } else {
-        const li = document.createElement("li");
-        li.textContent = Array.isArray(due) && due.length > 0
-          ? "No mastery data yet. The planner lists skills, but none have a graded review. Finish a session to start tracking."
-          : "No mastery data yet. Finish a session to start tracking.";
-        weak.appendChild(li);
       }
-    } catch (e) {
-      weak.innerHTML = "";
-      const li = document.createElement("li");
-      li.textContent = "Mastery data is unavailable right now. This is not an empty result.";
-      weak.appendChild(li);
     }
   }
 
   const history = document.getElementById("dash-history");
   if (history) {
-    try {
-      history.innerHTML = "";
-      const starts = log.filter((entry) => entry.kind === "session-start");
-      if (starts.length === 0) {
+    history.innerHTML = "";
+    if (starts.length > 0) {
+      starts.slice(-3).reverse().forEach((entry) => {
         const li = document.createElement("li");
-        li.textContent = "No sessions recorded on this device yet.";
+        const when = new Date(entry.at);
+        const template = (entry.payload && entry.payload.template === "weekend_40") ? "40 min" : "20 min";
+        li.textContent = when.toLocaleDateString([], { day: "numeric", month: "short" }) +
+          ", " + when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
+          " - " + template;
         history.appendChild(li);
-      } else {
-        starts.slice(-5).reverse().forEach((entry) => {
-          const li = document.createElement("li");
-          li.textContent = new Date(entry.at).toLocaleString() + " - " + (entry.payload.template || "session");
-          history.appendChild(li);
-        });
-      }
-    } catch (e) { /* local history is best effort */ }
+      });
+    }
   }
+}
+
+function elNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
 function renderOfflineBanner() {
@@ -1544,12 +1779,13 @@ document.addEventListener("DOMContentLoaded", () => {
   renderTimer();
   renderHints();
   renderItem();
+  renderChrome();
   setStartState(false);
   bindSessionControls();
   bindAnswerInputs();
   renderDashboard();
   registerSW();
-  restoreSession();
+  if (document.getElementById("sessionbar")) restoreSession();
   updateOnlineStatus();
   if (typeof navigator !== "undefined" && navigator.onLine === false) restoreCachedBoard();
   if (window.addEventListener) {
@@ -1569,6 +1805,10 @@ window.BreadstudySession = {
   resizePhoto,
   photoTargetSize,
   nextQuestion,
+  primaryAction,
+  primaryActionState,
+  renderChrome,
+  startSession,
   syncSession,
   setIdleState,
   skipItem,
