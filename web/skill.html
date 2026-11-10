@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#141210">
+<title>breadstudy skill</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<header class="topbar">
+<div class="brand">breadstudy skill</div>
+<nav class="tabs" aria-label="Primary">
+<a href="./index.html">Dashboard</a>
+<a href="./session.html">Session</a>
+<a href="./progress.html">Progress</a>
+</nav>
+</header>
+<div id="offline-banner" class="offline-banner" role="status" hidden></div>
+<main>
+<p><a href="./index.html">&larr; Back to dashboard</a></p>
+<section class="card" aria-labelledby="skill-h">
+<h2 id="skill-h">Skill</h2>
+<p id="skill-name" class="skill-title">Loading skill.</p>
+<p id="skill-strand" class="muted"></p>
+<p id="skill-vault" class="muted vault-note"></p>
+<div class="input-row">
+<button id="practise-btn" class="primary" type="button" disabled>Practise this skill</button>
+</div>
+<p id="skill-status" class="muted" role="status"></p>
+</section>
+
+<section class="card" aria-labelledby="summary-h">
+<h2 id="summary-h">From the item bank</h2>
+<p id="skill-summary" class="muted">Loading summary.</p>
+<h3 class="subhead">Notes and worked examples</h3>
+<ul class="clean note-list" id="skill-notes">
+<li class="muted">Loading notes.</li>
+</ul>
+<h3 class="subhead">Sample questions in this skill</h3>
+<ul class="clean question-list" id="skill-questions">
+<li class="muted">Loading questions.</li>
+</ul>
+</section>
+</main>
+<footer>The vault checkout is not mounted in this container, so notes are excerpts the indexer stored with each item. The vault note name is shown above.</footer>
+<script defer src="./skill.js"></script>
+</body>
+</html>

@@ -1353,9 +1353,28 @@ async function renderDashboard() {
   if (el) {
     if (skills.length === 0) {
       el.textContent = "No skills indexed yet. Run breadstudy-seed against the vault.";
+      const list = document.getElementById("dash-skill-list");
+      if (list) list.innerHTML = "";
     } else {
       const strands = [...new Set(skills.map((s) => s.strand))].sort();
       el.textContent = skills.length + " skills indexed across " + strands.join(", ") + ".";
+      const list = document.getElementById("dash-skill-list");
+      if (list) {
+        list.innerHTML = "";
+        skills.forEach((skill) => {
+          const li = document.createElement("li");
+          const link = document.createElement("a");
+          link.className = "skill-link";
+          link.href = "./skill.html?skill=" + encodeURIComponent(skill.id);
+          link.appendChild(document.createTextNode(skill.name));
+          const strand = document.createElement("span");
+          strand.className = "muted skill-strand";
+          strand.textContent = skill.strand || "";
+          link.appendChild(strand);
+          li.appendChild(link);
+          list.appendChild(li);
+        });
+      }
     }
   }
 

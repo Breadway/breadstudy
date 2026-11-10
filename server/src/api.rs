@@ -196,6 +196,13 @@ impl ApiError {
             message: format!("session {id} not found"),
         }
     }
+
+    fn unprocessable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -219,6 +226,9 @@ fn internal_error(error: anyhow::Error) -> ApiError {
 struct StartSessionRequest {
     template: Option<String>,
     grace_tokens: Option<u32>,
+    /// Scope the run to one skill (STUDY-45). Omitted keeps the existing
+    /// whole-bank behaviour, so old clients are unaffected.
+    skill_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -247,10 +257,27 @@ async fn start_session(
     if let Some(tokens) = request.grace_tokens {
         options.grace_tokens = tokens;
     }
+    if let Some(skill_id) = request.skill_id.as_deref() {
+        let skill_exists: Option<String> = sqlx::query_scalar("SELECT id FROM skills WHERE id = ?")
+            .bind(skill_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|error| internal_error(error.into()))?;
+        if skill_exists.is_none() {
+            return Err(ApiError::unprocessable(format!("unknown skill {skill_id}")));
+        }
+        options.skill_id = Some(skill_id.to_string());
+    }
     options.engine = state.engine;
     let view = session::start(&state.pool, options, Utc::now())
         .await
-        .map_err(internal_error)?;
+        .map_err(|error| {
+            if error.to_string().contains("has no verified items") {
+                ApiError::unprocessable(error.to_string())
+            } else {
+                internal_error(error)
+            }
+        })?;
     Ok((StatusCode::CREATED, Json(view)))
 }
 
