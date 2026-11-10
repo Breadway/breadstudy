@@ -102,6 +102,10 @@ textarea, input[type="text"] {
 .scratchpad { display: grid; gap: 8px; }
 #teach-board { display: grid; gap: 10px; min-height: 40px; }
 #teach-board p { margin: 0; line-height: 1.5; }
+.board-section { display: grid; gap: 8px; padding: 10px 0 14px; border-top: 1px solid var(--line); }
+.board-section h3 { margin: 0; font-size: 0.95rem; color: var(--muted); font-weight: 600; }
+.board-body { display: grid; gap: 8px; }
+.save-explanation { justify-self: start; min-height: 44px; }
 #teach-board ol { margin: 0; padding-left: 22px; display: grid; gap: 4px; }
 .board-latex { overflow-x: auto; padding: 6px 0; }
 .board-svg { display: flex; justify-content: center; padding: 6px 0; }
