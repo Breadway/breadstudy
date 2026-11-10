@@ -15,11 +15,14 @@ services:
     restart: unless-stopped
     ports:
       - "${BREADSTUDY_BIND:-127.0.0.1:7220}:7290"
+    # The local llama.cpp fallback runs on the host, not inside this container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       BREADSTUDY_LLM_BASE_URL: "${BREADSTUDY_LLM_BASE_URL:-https://opencode.ai/zen/go/v1}"
       BREADSTUDY_LLM_MODEL: "${BREADSTUDY_LLM_MODEL:-deepseek-v4.1-flash}"
       BREADSTUDY_LLM_API_KEY_FILE: "${BREADSTUDY_LLM_API_KEY_FILE:-/etc/breadstudy/llm.key}"
-      BREADSTUDY_LLM_FALLBACK_BASE_URL: "${BREADSTUDY_LLM_FALLBACK_BASE_URL:-http://127.0.0.1:7301/v1}"
+      BREADSTUDY_LLM_FALLBACK_BASE_URL: "${BREADSTUDY_LLM_FALLBACK_BASE_URL:-http://host.docker.internal:7301/v1}"
       BREADSTUDY_LLM_FALLBACK_MODELS: "${BREADSTUDY_LLM_FALLBACK_MODELS:-Ornith-1.5-9B-Q4_K_M,LFM3-Omni-2B-Q4_K_M}"
       BREADSTUDY_LLM_MIN_CONFIDENCE: "${BREADSTUDY_LLM_MIN_CONFIDENCE:-0.75}"
     volumes:

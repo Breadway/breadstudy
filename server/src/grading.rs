@@ -328,6 +328,7 @@ pub struct GradeRequest {
 #[serde(default)]
 pub struct CriterionVerdict {
     pub id: String,
+    #[serde(deserialize_with = "de_bool")]
     pub awarded: bool,
     pub reason: String,
 }
@@ -337,14 +338,52 @@ pub struct CriterionVerdict {
 #[serde(default)]
 pub struct GraderResponse {
     pub transcription: Option<String>,
+    #[serde(deserialize_with = "de_f32")]
     pub confidence: f32,
     pub method: Vec<CriterionVerdict>,
+    #[serde(deserialize_with = "de_bool")]
     pub final_correct: bool,
     pub final_answer: Option<String>,
     pub error_tags: Vec<String>,
     pub feedback: String,
     pub model: String,
+    #[serde(deserialize_with = "de_bool")]
     pub degraded: bool,
+}
+
+/// Models often emit 0/1 or "true" for booleans. Accept those instead of
+/// failing the whole grading call on a type mismatch.
+fn de_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    use serde_json::Value;
+    match Value::deserialize(deserializer)? {
+        Value::Bool(value) => Ok(value),
+        Value::Number(number) => Ok(number.as_f64().map(|value| value != 0.0).unwrap_or(false)),
+        Value::String(text) => Ok(matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "1"
+        )),
+        Value::Null => Ok(false),
+        other => Err(D::Error::custom(format!("expected a boolean, got {other}"))),
+    }
+}
+
+/// Confidence arrives as a float, integer or string depending on the model.
+fn de_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    use serde_json::Value;
+    match Value::deserialize(deserializer)? {
+        Value::Number(number) => Ok(number.as_f64().unwrap_or(0.0) as f32),
+        Value::String(text) => Ok(text.trim().parse::<f32>().unwrap_or(0.0)),
+        Value::Null => Ok(0.0),
+        other => Err(D::Error::custom(format!("expected a number, got {other}"))),
+    }
 }
 
 impl Default for GraderResponse {
