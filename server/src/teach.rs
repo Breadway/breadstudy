@@ -19,10 +19,21 @@ const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
 const DEFAULT_KEY_FILE: &str = "/etc/breadstudy/llm.key";
 
 const MAX_QUESTION: usize = 2000;
+const MAX_TRANSCRIPT: usize = 2400;
 const MAX_BLOCKS: usize = 24;
 const MAX_TEXT: usize = 4000;
 const MAX_SVG: usize = 20_000;
 const MAX_LATEX: usize = 2000;
+
+/// The skill a teaching turn is scoped to. It is resolved from the index so
+/// the model is told the student's real topic and the reply can name it.
+#[derive(Debug, Clone)]
+pub struct SkillContext {
+    pub id: String,
+    pub name: String,
+    pub strand: String,
+    pub vault_note: String,
+}
 
 /// One rendered piece of the board.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +57,15 @@ pub struct TeachRequest {
     pub item_id: Option<String>,
     #[serde(default)]
     pub history: Vec<ChatTurn>,
+    /// Optional skill the student picked from the topic list. Older clients
+    /// omit it and keep the original whole-board behaviour.
+    #[serde(default)]
+    pub skill_id: Option<String>,
+    /// A short text transcript of the current teaching conversation. The
+    /// client sends this instead of (or alongside) `history` so the model can
+    /// keep the thread without storing server-side chat state.
+    #[serde(default)]
+    pub transcript: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,6 +116,8 @@ impl TeachClient {
         question: &str,
         item_prompt: Option<&str>,
         history: &[ChatTurn],
+        topic: Option<&SkillContext>,
+        transcript: &str,
     ) -> anyhow::Result<Vec<Block>> {
         let mut messages = vec![ChatTurn {
             role: "system".into(),
@@ -112,9 +134,24 @@ impl TeachClient {
             });
         }
         let mut user = String::new();
+        if let Some(topic) = topic {
+            user.push_str("Topic the student picked:\n");
+            user.push_str(&topic.name);
+            user.push_str(" (");
+            user.push_str(&topic.strand);
+            user.push_str("). Vault note: ");
+            user.push_str(&topic.vault_note);
+            user.push_str(".\n\n");
+        }
         if let Some(prompt) = item_prompt {
             user.push_str("Current problem:\n");
             user.push_str(prompt);
+            user.push_str("\n\n");
+        }
+        let transcript = transcript.trim();
+        if !transcript.is_empty() {
+            user.push_str("Recent teaching conversation, kept for continuity:\n");
+            user.push_str(&truncate(transcript, MAX_TRANSCRIPT));
             user.push_str("\n\n");
         }
         user.push_str("Question:\n");
@@ -277,9 +314,42 @@ async fn teach(
         None => None,
     };
 
+    let topic: Option<SkillContext> = match request.skill_id.as_deref() {
+        Some(id) => {
+            let row: Option<(String, String, String)> = sqlx::query_as(
+                "SELECT name, strand, vault_note FROM skills WHERE id = ?1",
+            )
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal_error)?;
+            match row {
+                Some((name, strand, vault_note)) => Some(SkillContext {
+                    id: id.to_string(),
+                    name,
+                    strand,
+                    vault_note,
+                }),
+                None => {
+                    return Err((
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("unknown skill {id}"),
+                    ))
+                }
+            }
+        }
+        None => None,
+    };
+
     let blocks = state
         .client
-        .explain(&question, item_prompt.as_deref(), &request.history)
+        .explain(
+            &question,
+            item_prompt.as_deref(),
+            &request.history,
+            topic.as_ref(),
+            &request.transcript,
+        )
         .await
         .map_err(internal_error)?;
 
@@ -290,7 +360,10 @@ async fn teach(
         ));
     }
 
-    Ok(Json(TeachReply { blocks, skill: None }))
+    Ok(Json(TeachReply {
+        blocks,
+        skill: topic.map(|topic| topic.name),
+    }))
 }
 
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#141210">
+<title>breadstudy teaching mode</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/png" href="./icons/icon-192.png">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<link rel="stylesheet" href="./teach.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+</head>
+<body class="teach-body">
+<header class="teach-topbar">
+  <a class="brand" href="./index.html">breadstudy</a>
+  <span class="mode-tag">Teaching mode</span>
+</header>
+
+<main class="teach-main">
+  <section id="picker-view" class="picker-view" aria-labelledby="picker-heading">
+    <div class="picker-intro">
+      <h1 id="picker-heading">What should we work through?</h1>
+      <p>Pick a strand, a skill or a suggested group. The tutor writes on the board and talks while it writes. Interrupt any time you are confused.</p>
+    </div>
+    <label class="search-field" for="topic-search">
+      <span>Search topics</span>
+      <input id="topic-search" type="search" placeholder="Search strands and skills" autocomplete="off">
+    </label>
+    <p id="picker-status" class="status-line" role="status" aria-live="polite">Loading topics...</p>
+    <section class="group-block" aria-labelledby="suggested-heading">
+      <h2 id="suggested-heading">Suggested groups</h2>
+      <div id="suggested-grid" class="topic-grid"></div>
+    </section>
+    <div id="strand-list" class="strand-list"></div>
+    <p id="picker-empty" class="empty-state" hidden>No topic matches that search. Try a strand name such as Geometry, or clear the search.</p>
+  </section>
+
+  <section id="board-view" class="board-view" aria-labelledby="topic-title" hidden>
+    <div class="board-head">
+      <button type="button" id="back-btn" class="ghost-btn">All topics</button>
+      <div class="board-title-wrap">
+        <h1 id="topic-title">Topic</h1>
+        <p id="topic-subtitle" class="muted"></p>
+      </div>
+      <button type="button" id="repeat-btn" class="ghost-btn">Repeat last</button>
+    </div>
+    <div class="board-meta">
+      <span id="tts-badge" class="badge">Voice: browser</span>
+      <span id="board-status" class="status-line" role="status" aria-live="polite"></span>
+    </div>
+    <div id="sample-prompts" class="prompt-chips" aria-label="Suggested questions"></div>
+    <div id="teach-board" class="teach-board" tabindex="0"></div>
+  </section>
+</main>
+
+<div id="control-dock" class="control-dock" hidden>
+  <button id="interrupt-btn" type="button" class="interrupt-btn" aria-keyshortcuts="Space Escape">
+    <span class="interrupt-icon" aria-hidden="true">■</span>
+    <span>Stop and ask</span>
+  </button>
+  <div class="speech-panel">
+    <div class="speech-row">
+      <button id="mute-btn" type="button" class="toggle-btn" aria-pressed="false">Mute</button>
+      <label class="field" for="backend-select">
+        <span>Speech</span>
+        <select id="backend-select">
+          <option value="auto">Auto (Kokoro first)</option>
+          <option value="kokoro">Kokoro (local)</option>
+          <option value="gemini">Gemini (quality)</option>
+          <option value="breeze">Breeze (GPU)</option>
+          <option value="browser">Browser voice</option>
+        </select>
+      </label>
+    </div>
+    <div class="speech-row">
+      <label class="field" for="voice-select">
+        <span>Voice</span>
+        <select id="voice-select"></select>
+      </label>
+      <label class="field range-field" for="rate-range">
+        <span>Speed <output id="rate-output" for="rate-range">1.0x</output></span>
+        <input id="rate-range" type="range" min="0.5" max="2" step="0.05" value="1">
+      </label>
+    </div>
+    <p id="tts-status" class="tts-status" role="status" aria-live="polite"></p>
+  </div>
+  <form id="ask-form" class="ask-form">
+    <label class="sr-only" for="ask-input">Ask a follow-up question</label>
+    <textarea id="ask-input" rows="2" placeholder="What are you stuck on? Ask here, then press Ask."></textarea>
+    <button id="ask-btn" type="submit" class="primary">Ask</button>
+  </form>
+</div>
+
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="./teach.js"></script>
+</body>
+</html>
