@@ -1267,7 +1267,7 @@ fn strip_units(text: &str) -> String {
 }
 
 fn numbers(text: &str) -> Vec<f64> {
-    let text = strip_units(text);
+    let text = strip_units(&normalize_grouping(&text));
     let chars: Vec<char> = text.chars().collect();
     let mut values = Vec::new();
     let mut index = 0;
@@ -1293,6 +1293,37 @@ fn numbers(text: &str) -> Vec<f64> {
         }
     }
     values
+}
+
+/// Join thousands separators so `45 000` and `1,000,000` read as one number.
+/// Without this, the last-number heuristic picks up the final group instead
+/// of the value and marks correct answers wrong.
+fn normalize_grouping(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let current = chars[index];
+        let separator = (current == ' ' || current == ',' || current == '\u{a0}')
+            && out.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false);
+        if separator {
+            let rest: String = chars[index + 1..].iter().take(3).collect();
+            let after = chars.get(index + 4);
+            let group_is_three = rest.len() == 3 && rest.chars().all(|c| c.is_ascii_digit());
+            let group_ends = after.map(|c| !c.is_ascii_digit()).unwrap_or(true);
+            if group_is_three && group_ends {
+                index += 1;
+                continue;
+            }
+        }
+        out.push(current);
+        index += 1;
+    }
+    // Repeat so `1 000 000` collapses fully from the inside out.
+    if out.len() != text.len() {
+        return normalize_grouping(&out);
+    }
+    out
 }
 
 fn last_number(text: &str) -> Option<f64> {
@@ -1343,8 +1374,20 @@ mod unit_tests {
     use super::*;
 
     #[test]
-    fn parses_object_rubric() {
-        let rubric = Rubric::parse(
+    fn grouped_numbers_are_one_value() {
+        assert_eq!(last_number("45 000 cm²"), Some(45000.0));
+        assert_eq!(last_number("1,000,000 cm3"), Some(1_000_000.0));
+        assert_eq!(last_number("45000cm^2"), Some(45000.0));
+    }
+
+    #[test]
+    fn correct_grouped_answer_matches() {
+        assert_eq!(final_answer_matches("45000cm^2", "45 000 cm²"), Some(true));
+        assert_eq!(final_answer_matches("4500", "45 000"), Some(false));
+    }
+
+    #[test]
+    fn parses_object_rubric() {        let rubric = Rubric::parse(
             r#"{"method":[{"id":"formula","description":"Uses V = pi r^2 h","marks":1},{"id":"substitute","description":"Substitutes r = 3, h = 7","marks":1}],"final":{"marks":1,"answer":"63pi cm^3"}}"#,
             "197.9 cm3",
         );
