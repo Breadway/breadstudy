@@ -141,6 +141,21 @@ function applyServerView(view) {
   if (!sessionState.item || !previous || previous.id !== sessionState.item.id) {
     resetAttemptState();
   }
+  const explainItem = view.phase === "explain" ? practisedExplainItem() : null;
+  if (explainItem) {
+    sessionState.item = {
+      id: explainItem.id,
+      skill_id: explainItem.skill_id,
+      strand: explainItem.strand,
+      prompt: explainItem.prompt,
+      hints: (explainItem.hints || []).slice(),
+      hint_count: explainItem.hint_count,
+      hint_unlocked: explainItem.hint_unlocked
+    };
+    sessionState.hintsUnlocked = explainItem.hint_unlocked || 0;
+    sessionState.hintTotal = explainItem.hint_count || sessionState.item.hints.length;
+    sessionState.hintsUsed = sessionState.hintsUnlocked;
+  }
   persistSessionId(view.id);
   renderPhases("phase-row");
   renderTimer();
@@ -148,7 +163,7 @@ function applyServerView(view) {
   renderItem();
   const finished = view.phase === "end" || Boolean(view.ended_at);
   const nextQuestion = document.getElementById("next-question-btn");
-  if (nextQuestion) nextQuestion.disabled = finished || !sessionState.item;
+  if (nextQuestion) nextQuestion.disabled = finished || !sessionState.item || Boolean(explainItem);
   setStartState(!finished);
   if (finished) persistSessionId(null);
 }
@@ -159,10 +174,16 @@ function renderItem() {
   if (sessionState.item) {
     prompt.textContent = sessionState.item.prompt;
     const strand = document.getElementById("item-strand");
-    if (strand) strand.textContent = sessionState.item.strand || "";
+    if (strand) {
+      const explaining = currentPhase() === "explain" && lastPractised && lastPractised.item &&
+        lastPractised.item.id === sessionState.item.id;
+      strand.textContent = explaining
+        ? "Explain phase: the question you just practised" + (lastPractised.answer ? " - your answer: " + lastPractised.answer : "")
+        : (sessionState.item.strand || "");
+    }
   } else {
     prompt.textContent = sessionState.sessionId
-      ? "No items indexed for this skill yet. Run the seeder, or pick another skill."
+      ? "This phase has no question attached. Use the board, or move to the next phase."
       : "Press Start to pull a due item from the planner.";
   }
 }
@@ -294,14 +315,19 @@ async function teach() {
   if (btn) btn.disabled = true;
   if (status) status.textContent = "Thinking...";
   try {
+    const activeItem = sessionState.item;
+    const answerText = lastPractised && activeItem && lastPractised.item.id === activeItem.id
+      ? lastPractised.answer
+      : lastAnswerText;
+    const worked = answerText ? question + "\n\nMy answer was: " + answerText : question;
     const reply = await postJson("/api/teach", {
-      question,
-      item_id: sessionState.item ? sessionState.item.id : null,
+      question: worked,
+      item_id: activeItem ? activeItem.id : null,
       history: teachHistory
     });
     if (board) board.innerHTML = "";
     reply.blocks.forEach((block, index) => setTimeout(() => addBlock(block), index * 140));
-    teachHistory.push({ role: "user", content: question });
+    teachHistory.push({ role: "user", content: worked });
     teachHistory.push({
       role: "assistant",
       content: reply.blocks.map((b) => b.text || b.latex || (b.items || []).join("; ")).join("\n")
@@ -372,6 +398,12 @@ function renderGrade(attempt) {
 
 let pendingPhoto = null;
 let lastAnswerText = "";
+let lastPractised = null;
+
+function practisedExplainItem() {
+  if (!lastPractised || !lastPractised.item) return null;
+  return lastPractised.item;
+}
 
 function setSubmitLabel(label) {
   const btn = document.getElementById("submit-btn");
@@ -574,6 +606,18 @@ async function submitAnswer() {
     pendingPhoto = null;
     setSubmitLabel("Submit answer");
     lastAnswerText = (reply.attempt && reply.attempt.given) || latex;
+    lastPractised = {
+      item: {
+        id: item.id,
+        skill_id: item.skill_id,
+        strand: item.strand,
+        prompt: item.prompt,
+        hints: (item.hints || []).slice(),
+        hint_count: item.hint_count,
+        hint_unlocked: sessionState.hintsUnlocked
+      },
+      answer: lastAnswerText
+    };
     if (latexEl && payload.input_kind === "latex") latexEl.value = "";
     renderGrade(reply.attempt);
     logLocal("graded", { item: item.id, correct: reply.attempt.correct });
@@ -642,6 +686,10 @@ async function nextQuestion() {
     setSessionStatus("The session has ended. There is no next question.");
     return;
   }
+  if (currentPhase() === "explain" && lastPractised) {
+    setSessionStatus("Explain stays on the question you just practised. Ask the tutor on the board.");
+    return;
+  }
   const btn = document.getElementById("next-question-btn");
   if (btn) btn.disabled = true;
   const before = sessionState.item ? sessionState.item.id : null;
@@ -675,7 +723,8 @@ async function advancePhase() {
       setSessionStatus("The session has ended.");
       return;
     }
-    if (!sessionState.phaseExhausted && CONTENT_PHASES.has(currentPhase()) && sessionState.item) {
+    if (!sessionState.phaseExhausted && CONTENT_PHASES.has(currentPhase()) && sessionState.item &&
+        !(currentPhase() === "explain" && lastPractised)) {
       const before = sessionState.item.id;
       try {
         const view = await postJson("/api/session/" + sessionState.sessionId + "/next-item", {});
