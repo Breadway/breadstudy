@@ -63,6 +63,7 @@ let sessionState = {
   hintTotal: 0,
   item: null,
   sessionId: null,
+  template: null,
   serverMode: false,
   phaseExhausted: false,
   idle: true,
@@ -155,6 +156,11 @@ function applyServerView(view, options) {
   sessionState.offline = offline;
   sessionState.idle = false;
   sessionState.sessionId = view.id;
+  sessionState.template = view.template || sessionState.template;
+  if (view.id !== sessionStatsId) {
+    sessionStatsId = view.id;
+    sessionStats = loadSessionStats(view.id);
+  }
   sessionState.serverMode = !offline;
   const index = typeof view.phase_index === "number" ? view.phase_index : PHASE_INDEX[view.phase];
   const nextIndex = index !== undefined ? index : 0;
@@ -238,6 +244,34 @@ function applyServerView(view, options) {
   }
 }
 
+function marksLine() {
+  return "Method " + sessionStats.method + "/" + sessionStats.methodTotal +
+    ", final answer " + sessionStats.final + "/" + sessionStats.finalTotal + ".";
+}
+
+function phaseContent(phase) {
+  if (phase === "reflect") {
+    return "Reflection (no question to answer).\n" +
+      "1. Which step felt automatic today?\n" +
+      "2. Where did you lose a mark, and what will you check first next time?\n" +
+      "3. What one thing should the next session start with?\n\n" +
+      "Write a short note in the answer box if you want it kept, then press Next phase.";
+  }
+  if (phase === "end") {
+    return "Session complete.\n" +
+      "Questions marked this session: " + sessionStats.graded + ".\n" +
+      marksLine() + "\n" +
+      "Hints revealed: " + sessionStats.hints + ".\n\n" +
+      "Nothing is blocked. Start a new session when you are ready.";
+  }
+  if (phase === "prime") {
+    return "Warm-up (no question to answer).\n" +
+      "Write down one formula you will need today, and one thing you remember from last session.\n" +
+      "Then press Next phase when you feel warm.";
+  }
+  return null;
+}
+
 function renderItem() {
   const prompt = document.getElementById("item-prompt");
   if (!prompt) return;
@@ -251,10 +285,22 @@ function renderItem() {
         ? "Explain phase: the question you just practised" + (lastPractised.answer ? " - your answer: " + lastPractised.answer : "")
         : (sessionState.item.strand || "");
     }
+  } else if (sessionState.sessionId) {
+    const phase = currentPhase();
+    const content = phaseContent(phase);
+    prompt.textContent = content || "This phase has no question attached. Use the board, or move to the next phase.";
+    const strand = document.getElementById("item-strand");
+    if (strand) {
+      strand.textContent = phase === "end"
+        ? "Session summary"
+        : phase === "reflect"
+          ? "Reflection"
+          : phase === "prime"
+            ? "Warm-up"
+            : "";
+    }
   } else {
-    prompt.textContent = sessionState.sessionId
-      ? "This phase has no question attached. Use the board, or move to the next phase."
-      : "Press Start to pull a due item from the planner.";
+    prompt.textContent = "Press Start to pull a due item from the planner.";
   }
 }
 
@@ -487,6 +533,26 @@ function renderGrade(attempt) {
 let pendingPhoto = null;
 let lastAnswerText = "";
 let lastPractised = null;
+let sessionStats = blankSessionStats();
+let sessionStatsId = null;
+
+function blankSessionStats() {
+  return { graded: 0, items: [], method: 0, methodTotal: 0, final: 0, finalTotal: 0, hints: 0 };
+}
+
+function sessionStatsKey(id) {
+  return "breadstudy-stats-" + id;
+}
+
+function loadSessionStats(id) {
+  const stored = readStoredJson(sessionStatsKey(id), null);
+  return Object.assign(blankSessionStats(), stored || {});
+}
+
+function saveSessionStats() {
+  if (!sessionStatsId) return;
+  writeStoredJson(sessionStatsKey(sessionStatsId), sessionStats);
+}
 
 function practisedExplainItem() {
   if (!lastPractised || !lastPractised.item) return null;
@@ -615,7 +681,15 @@ async function submitAnswer() {
   const item = sessionState.item;
   if (status) status.textContent = "";
   if (!item) {
-    if (status) status.textContent = "Start a session first so there is an item to mark.";
+    if (status) {
+      status.textContent = !sessionState.sessionId
+        ? "Start a session first so there is an item to mark."
+        : currentPhase() === "end"
+          ? "This is the session summary. There is no question to mark here."
+          : currentPhase() === "reflect"
+            ? "Reflection has no right answer to mark. Type a note if you like, then press Next phase."
+            : "This phase has no question to mark.";
+    }
     return;
   }
   const latexEl = document.getElementById("latex-answer");
@@ -708,6 +782,13 @@ async function submitAnswer() {
     };
     if (latexEl && payload.input_kind === "latex") latexEl.value = "";
     renderGrade(reply.attempt);
+    sessionStats.graded += 1;
+    if (!sessionStats.items.includes(item.id)) sessionStats.items.push(item.id);
+    sessionStats.method += Number(reply.attempt.method_marks) || 0;
+    sessionStats.methodTotal += Number(reply.attempt.method_marks_total) || 0;
+    sessionStats.final += Number(reply.attempt.final_marks) || 0;
+    sessionStats.finalTotal += Number(reply.attempt.final_marks_total) || 0;
+    saveSessionStats();
     logLocal("graded", { item: item.id, correct: reply.attempt.correct });
   } catch (e) {
     const networkError = e && (
@@ -941,7 +1022,9 @@ function renderHints() {
     return;
   }
   if (!item) {
-    if (meta) meta.textContent = "Start a session to load the hint ladder.";
+    if (meta) meta.textContent = sessionState.sessionId
+      ? "No hints in this phase."
+      : "Start a session to load the hint ladder.";
     if (btn) btn.disabled = true;
     return;
   }
@@ -1000,6 +1083,8 @@ async function useHint() {
         );
       }
       renderHints();
+      sessionStats.hints += 1;
+      saveSessionStats();
       logLocal("hint", { session: sessionState.sessionId, count: sessionState.hintsUnlocked, source: "server" });
       return;
     } catch (e) {
@@ -1012,6 +1097,8 @@ async function useHint() {
     sessionState.hintsUnlocked += 1;
     sessionState.hintsUsed = sessionState.hintsUnlocked;
     renderHints();
+    sessionStats.hints += 1;
+    saveSessionStats();
     logLocal("hint", { item: item.id, count: sessionState.hintsUnlocked });
   }
 }
