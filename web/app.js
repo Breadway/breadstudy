@@ -379,6 +379,7 @@ async function restoreSession() {
     }
     setIdleState();
     persistSessionId(null);
+    updateStartLink();
     setStartState(false);
     setSessionStatus("The stored session is no longer on the server. Press Start for a fresh one.");
     logLocal("session-restore-failed", { session: stored, error: String(e) });
@@ -1265,7 +1266,16 @@ function computeSessionStreak(log) {
   return streak;
 }
 
+function updateStartLink() {
+  const startLink = document.getElementById("start-session-link");
+  if (!startLink) return;
+  const active = readStoredSessionId() || urlSessionId();
+  startLink.textContent = active ? "Resume session" : "Start session";
+  startLink.setAttribute("aria-label", active ? "Resume the session already in progress" : "Start a new session");
+}
+
 async function renderDashboard() {
+  updateStartLink();
   const skills = await fetchSkills();
   const el = document.getElementById("dash-skills");
   if (el) {
