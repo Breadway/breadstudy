@@ -12,39 +12,49 @@
 </head>
 <body>
 <header class="topbar">
-<div class="brand">breadstudy skill</div>
+<div class="topbar-row">
+<a class="brand" href="./index.html" aria-label="breadstudy dashboard">
+<span class="brand-mark" aria-hidden="true">b</span>
+<span class="brand-text">breadstudy</span>
+</a>
 <nav class="tabs" aria-label="Primary">
 <a href="./index.html">Dashboard</a>
 <a href="./session.html">Session</a>
 <a href="./progress.html">Progress</a>
+<a href="./teach.html">Teach</a>
 </nav>
+</div>
 </header>
 <div id="offline-banner" class="offline-banner" role="status" hidden></div>
 <main>
-<p><a href="./index.html">&larr; Back to dashboard</a></p>
-<section class="card" aria-labelledby="skill-h">
-<h2 id="skill-h">Skill</h2>
-<p id="skill-name" class="skill-title">Loading skill.</p>
-<p id="skill-strand" class="muted"></p>
-<p id="skill-vault" class="muted vault-note"></p>
-<div class="input-row">
+<section class="card" aria-labelledby="skill-name">
+<p class="eyebrow" id="skill-strand">Skill</p>
+<h1 id="skill-name" class="skill-title">Loading skill.</h1>
+<p id="skill-summary" class="muted">Loading summary.</p>
+<div class="answer-tools">
 <button id="practise-btn" class="primary" type="button" disabled>Practise this skill</button>
 </div>
-<p id="skill-status" class="muted" role="status"></p>
+<p id="skill-vault" class="muted vault-note"></p>
+<p id="skill-status" class="muted small" role="status"></p>
 </section>
 
-<section class="card" aria-labelledby="summary-h">
-<h2 id="summary-h">From the item bank</h2>
-<p id="skill-summary" class="muted">Loading summary.</p>
-<h3 class="subhead">Notes and worked examples</h3>
+<details class="fold" id="notes-details">
+<summary><span>Notes</span><span class="fold-meta" id="notes-count"></span></summary>
+<div class="fold-body">
 <ul class="clean note-list" id="skill-notes">
 <li class="muted">Loading notes.</li>
 </ul>
-<h3 class="subhead">Sample questions in this skill</h3>
+</div>
+</details>
+
+<details class="fold" id="questions-details">
+<summary><span>Questions</span><span class="fold-meta" id="questions-count"></span></summary>
+<div class="fold-body">
 <ul class="clean question-list" id="skill-questions">
 <li class="muted">Loading questions.</li>
 </ul>
-</section>
+</div>
+</details>
 </main>
 <footer>The vault checkout is not mounted in this container, so notes are excerpts the indexer stored with each item. The vault note name is shown above.</footer>
 <script defer src="./skill.js"></script>

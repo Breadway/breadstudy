@@ -55,7 +55,11 @@ async fn start_server() -> TestServer {
 
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // The shared Hestia runner can be saturated by other agents' cargo
+    // builds. A cold server start plus migrations then takes well over a
+    // minute even though it is healthy; 180 s keeps the test a startup
+    // check instead of a load benchmark.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         if let Some(status) = child.try_wait().expect("poll the server process") {
             panic!("breadstudy-server exited before becoming healthy: {status}");
