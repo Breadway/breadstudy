@@ -129,6 +129,17 @@ label.file-btn {
   text-align: center;
 }
 input[type="file"] { position: absolute; left: -9999px; }
+.offline-banner {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  padding: 10px 16px;
+  background: #6b4a1f;
+  color: #ffe7c2;
+  border-bottom: 1px solid var(--accent);
+  text-align: center;
+}
+.offline-banner[hidden] { display: none; }
 footer { padding: 24px 16px; color: var(--muted); text-align: center; }
 
 /* Phone-first: 360px viewport keeps camera and mic reachable. */

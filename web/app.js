@@ -6,6 +6,53 @@
 const PHASES = ["prime", "recall", "practice", "explain", "reflect", "break", "end"];
 const TEMPLATE_20 = { recall: 2 * 60, practice: 10 * 60, explain: 5 * 60, reflect: 3 * 60 };
 const ACTIVE_SESSION_KEY = "breadstudy-active-session";
+const SESSION_CACHE_KEY = "breadstudy-session-cache";
+const ATTEMPT_QUEUE_KEY = "breadstudy-attempt-queue";
+const BOARD_CACHE_KEY = "breadstudy-board-blocks";
+
+function readStoredJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function writeStoredJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function cacheSessionView(view) {
+  writeStoredJson(SESSION_CACHE_KEY, { at: new Date().toISOString(), view });
+}
+
+function readCachedSessionView() {
+  const cached = readStoredJson(SESSION_CACHE_KEY, null);
+  return cached && cached.view ? cached : null;
+}
+
+function readAttemptQueue() {
+  const queue = readStoredJson(ATTEMPT_QUEUE_KEY, []);
+  return Array.isArray(queue) ? queue : [];
+}
+
+function writeAttemptQueue(queue) {
+  return writeStoredJson(ATTEMPT_QUEUE_KEY, queue);
+}
+
+function queueAttempt(payload) {
+  const queue = readAttemptQueue();
+  queue.push({ id: Date.now() + "-" + Math.random().toString(16).slice(2), at: new Date().toISOString(), payload });
+  return writeAttemptQueue(queue);
+}
+
 
 let sessionState = {
   phaseIndex: 0,
@@ -20,7 +67,9 @@ let sessionState = {
   phaseExhausted: false,
   idle: true,
   pollId: null,
-  syncInFlight: false
+  syncInFlight: false,
+  offline: false,
+  flushInFlight: false
 };
 
 function readStoredSessionId() {
@@ -101,10 +150,12 @@ async function fetchSkills() {
 
 const PHASE_INDEX = { prime: 0, recall: 1, practice: 2, explain: 3, reflect: 4, break: 5, end: 6 };
 
-function applyServerView(view) {
+function applyServerView(view, options) {
+  const offline = Boolean(options && options.offline);
+  sessionState.offline = offline;
   sessionState.idle = false;
   sessionState.sessionId = view.id;
-  sessionState.serverMode = true;
+  sessionState.serverMode = !offline;
   const index = typeof view.phase_index === "number" ? view.phase_index : PHASE_INDEX[view.phase];
   const nextIndex = index !== undefined ? index : 0;
   const phaseChanged = nextIndex !== sessionState.phaseIndex;
@@ -161,6 +212,13 @@ function applyServerView(view) {
     sessionState.hintsUsed = sessionState.hintsUnlocked;
   }
   persistSessionId(view.id);
+  if (offline) {
+    sessionState.serverMode = false;
+    renderOfflineBanner();
+  } else {
+    sessionState.serverMode = true;
+    cacheSessionView(view);
+  }
   renderPhases("phase-row");
   renderTimer();
   renderHints();
@@ -175,7 +233,7 @@ function applyServerView(view) {
     persistSessionId(null);
     setSessionStatus("Session finished.");
   } else {
-    startPolling();
+    if (!offline) startPolling();
     if (!sessionState.timerId) startTimer();
   }
 }
@@ -213,19 +271,19 @@ async function startSession() {
     startTimer();
     logLocal("session-start", { template: "school_day_20", session: view.id });
   } catch (e) {
-    sessionState.serverMode = false;
-    sessionState.sessionId = null;
-    sessionState.item = SAMPLE_ITEM;
-    sessionState.phaseIndex = 0;
-    sessionState.remaining = TEMPLATE_20.recall;
-    sessionState.hintsUsed = 0;
-    renderPhases("phase-row");
-    renderTimer();
-    renderHints();
-    renderItem();
-    startTimer();
-    setSessionStatus("Working offline with the sample item. Attempts will queue until the server is back.");
-    logLocal("session-start", { template: "20min", offline: true });
+    const cached = readCachedSessionView();
+    if (cached) {
+      applyServerView(cached.view, { offline: true });
+      stopPolling();
+      startTimer();
+      setSessionStatus("Offline: showing the session cached on this device at " +
+        new Date(cached.at).toLocaleString() + ". Answers queue until you reconnect.");
+      logLocal("session-start-cached", { at: cached.at });
+      return;
+    }
+    setIdleState();
+    setSessionStatus("Could not start a session: the server is unreachable and nothing is cached on this device yet.");
+    logLocal("session-start-failed", { error: String(e) });
   }
 }
 
@@ -253,6 +311,16 @@ async function restoreSession() {
     }
     return true;
   } catch (e) {
+    const cached = readCachedSessionView();
+    if (cached) {
+      applyServerView(cached.view, { offline: true });
+      stopPolling();
+      startTimer();
+      setSessionStatus("Server unreachable. Showing the session cached on this device at " +
+        new Date(cached.at).toLocaleString() + ".");
+      logLocal("session-restore-cached", { session: stored, at: cached.at });
+      return true;
+    }
     setIdleState();
     persistSessionId(null);
     setStartState(false);
@@ -345,6 +413,7 @@ async function teach() {
       history: teachHistory
     });
     if (board) board.innerHTML = "";
+    writeStoredJson(BOARD_CACHE_KEY, { at: new Date().toISOString(), blocks: reply.blocks });
     reply.blocks.forEach((block, index) => setTimeout(() => addBlock(block), index * 140));
     teachHistory.push({ role: "user", content: worked });
     teachHistory.push({
@@ -563,8 +632,8 @@ async function submitAnswer() {
   if (btn) btn.disabled = true;
   if (status) status.textContent = "Marking...";
 
+  let payload = null;
   try {
-    let payload;
     if (pendingPhoto) {
       payload = {
         item_id: item.id,
@@ -641,7 +710,21 @@ async function submitAnswer() {
     renderGrade(reply.attempt);
     logLocal("graded", { item: item.id, correct: reply.attempt.correct });
   } catch (e) {
-    if (status) {
+    const networkError = e && (
+      e.name === "TypeError" ||
+      /Failed to fetch|NetworkError|Load failed|network/i.test(String(e.message || ""))
+    );
+    if (networkError && payload) {
+      if (queueAttempt(payload)) {
+        if (status) {
+          status.textContent = "Saved on this device. The answer will be sent when the server is back.";
+        }
+        setSessionStatus("Offline: " + readAttemptQueue().length + " answer(s) waiting to send.");
+        logLocal("attempt-queued", { item: item.id, kind: payload.input_kind });
+      } else if (status) {
+        status.textContent = "Could not mark that and could not save it offline. Free some storage and retry.";
+      }
+    } else if (status) {
       status.textContent = "Could not mark that: " + e.message +
         (pendingPhoto ? " The photo is still attached, so you can retry." : "");
     }
@@ -1087,6 +1170,83 @@ async function renderDashboard() {
   }
 }
 
+function renderOfflineBanner() {
+  const banner = document.getElementById("offline-banner");
+  if (!banner) return;
+  const online = !(typeof navigator !== "undefined" && navigator.onLine === false);
+  const waiting = readAttemptQueue().length;
+  banner.hidden = online;
+  if (!online) {
+    banner.textContent = "Offline: showing content cached on this device." +
+      (waiting ? " " + waiting + " answer(s) will send when you reconnect." : "");
+  }
+}
+
+function updateOnlineStatus() {
+  renderOfflineBanner();
+  const online = !(typeof navigator !== "undefined" && navigator.onLine === false);
+  if (online) flushAttemptQueue();
+}
+
+function restoreCachedBoard() {
+  const cached = readStoredJson(BOARD_CACHE_KEY, null);
+  if (!cached || !Array.isArray(cached.blocks) || cached.blocks.length === 0) return;
+  cached.blocks.forEach((block) => addBlock(block));
+  const status = document.getElementById("teach-status");
+  if (status) {
+    status.textContent = "Showing the board cached at " + new Date(cached.at).toLocaleString() + ".";
+  }
+}
+
+async function flushAttemptQueue() {
+  if (sessionState.flushInFlight) return;
+  const queue = readAttemptQueue();
+  if (queue.length === 0) return;
+  sessionState.flushInFlight = true;
+  const remaining = [];
+  let sent = 0;
+  for (const entry of queue) {
+    try {
+      const reply = await postJson("/api/attempts", entry.payload);
+      if (reply.status === "needs_confirmation") {
+        const current = sessionState.item;
+        if (!current || current.id !== entry.payload.item_id) {
+          remaining.push(entry);
+          continue;
+        }
+        const transcription = reply.transcription || "";
+        if (entry.payload.input_kind === "photo" && entry.payload.photo_base64) {
+          pendingPhoto = {
+            base64: entry.payload.photo_base64,
+            mediaType: entry.payload.photo_media_type || "image/jpeg",
+            transcription
+          };
+        }
+        const latexEl = document.getElementById("latex-answer");
+        if (latexEl) latexEl.value = transcription;
+        refreshAnswerPreview();
+        setSubmitLabel("Confirm and mark");
+        setSessionStatus("A saved photo needs confirmation. Check the transcription, then press Confirm and mark.");
+        continue;
+      }
+      sent += 1;
+      if (reply.attempt && sessionState.item && sessionState.item.id === entry.payload.item_id) {
+        renderGrade(reply.attempt);
+      }
+      logLocal("graded", { item: entry.payload.item_id, correct: reply.attempt.correct, queued: true });
+    } catch (e) {
+      remaining.push(entry);
+    }
+  }
+  writeAttemptQueue(remaining);
+  sessionState.flushInFlight = false;
+  renderOfflineBanner();
+  if (sent > 0) {
+    setSessionStatus("Sent " + sent + " saved answer(s)." +
+      (remaining.length ? " " + remaining.length + " still waiting." : ""));
+  }
+}
+
 function registerSW() {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
@@ -1104,6 +1264,12 @@ document.addEventListener("DOMContentLoaded", () => {
   renderDashboard();
   registerSW();
   restoreSession();
+  updateOnlineStatus();
+  if (typeof navigator !== "undefined" && navigator.onLine === false) restoreCachedBoard();
+  if (window.addEventListener) {
+    window.addEventListener("online", updateOnlineStatus);
+    window.addEventListener("offline", renderOfflineBanner);
+  }
 });
 
 window.BreadstudySession = {
@@ -1119,5 +1285,9 @@ window.BreadstudySession = {
   nextQuestion,
   syncSession,
   setIdleState,
-  skipItem
+  skipItem,
+  updateOnlineStatus,
+  flushAttemptQueue,
+  readAttemptQueue,
+  restoreCachedBoard
 };
