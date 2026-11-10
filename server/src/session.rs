@@ -203,26 +203,53 @@ impl Template {
 /// never depends on the FSRS implementation or its types.
 pub type DueScoreFn = fn(&str) -> Option<f64>;
 
-/// Optional due-ness scorer injected by the caller.
+/// Optional due-ness scorer injected by the caller. A plain function
+/// pointer is enough for tests and the planner routes; the live session
+/// router uses [`SessionEngine::fsrs`], which loads the scores from the
+/// scheduler at the start of every run.
 #[derive(Clone, Copy, Default)]
 pub struct SessionEngine {
     due_score: Option<DueScoreFn>,
+    fsrs: bool,
 }
 
 impl SessionEngine {
     pub fn new() -> Self {
-        Self { due_score: None }
+        Self {
+            due_score: None,
+            fsrs: false,
+        }
     }
 
     pub fn with_due_score(due_score: DueScoreFn) -> Self {
         Self {
             due_score: Some(due_score),
+            fsrs: false,
         }
     }
 
-    fn score(&self, skill_id: &str) -> f64 {
+    /// Use the FSRS scheduler: `start` loads every skill's due score from
+    /// `skill_schedule` before selecting the run's content.
+    pub fn fsrs() -> Self {
+        Self {
+            due_score: None,
+            fsrs: true,
+        }
+    }
+
+    fn uses_fsrs(self) -> bool {
+        self.fsrs
+    }
+
+    /// True when selection should order by due-ness instead of bank order.
+    fn is_active(self) -> bool {
+        self.fsrs || self.due_score.is_some()
+    }
+
+    fn score(self, skill_id: &str, due_scores: &std::collections::HashMap<String, f64>) -> f64 {
         self.due_score
             .and_then(|f| f(skill_id))
+            .or_else(|| due_scores.get(skill_id).copied())
             .filter(|score| score.is_finite())
             .unwrap_or(0.0)
     }
@@ -365,7 +392,6 @@ struct BankItem {
     prompt: String,
     hints: Vec<String>,
     audio_path: Option<String>,
-    created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -518,14 +544,16 @@ async fn sync_cached_ladder(pool: &SqlitePool, run: &mut Run, item_id: &str) -> 
 }
 
 async fn load_bank(pool: &SqlitePool) -> anyhow::Result<Vec<BankItem>> {
+    // No created_at bias: selection order comes from FSRS due scores, and
+    // id is only a stable tie-break inside one score group.
     let rows = sqlx::query(
         "SELECT i.id, i.skill_id, COALESCE(s.strand, '') AS strand, i.prompt, i.hints, \
-         a.path AS audio_path, i.created_at \
+         a.path AS audio_path \
          FROM items i \
          LEFT JOIN skills s ON s.id = i.skill_id \
          LEFT JOIN item_audio a ON a.item_id = i.id \
          WHERE i.status = 'verified' \
-         ORDER BY i.created_at, i.id",
+         ORDER BY i.id",
     )
     .fetch_all(pool)
     .await?;
@@ -538,19 +566,44 @@ async fn load_bank(pool: &SqlitePool) -> anyhow::Result<Vec<BankItem>> {
             prompt: row.get("prompt"),
             hints: serde_json::from_str(&row.get::<String, _>("hints")).unwrap_or_default(),
             audio_path: row.get("audio_path"),
-            created_at: row.get("created_at"),
         })
         .collect())
 }
 
-fn sort_due(items: &mut [&BankItem], engine: SessionEngine) {
+/// Order by due score, then rotate inside each equal-score group so a
+/// repeated session over the same bank moves on instead of serving the
+/// same items forever. A plain `SessionEngine::new()` keeps bank order.
+fn sort_due(
+    items: &mut [&BankItem],
+    engine: SessionEngine,
+    due_scores: &std::collections::HashMap<String, f64>,
+    rotation: usize,
+) {
+    if !engine.is_active() {
+        return;
+    }
     items.sort_by(|left, right| {
         engine
-            .score(&right.skill_id)
-            .total_cmp(&engine.score(&left.skill_id))
-            .then_with(|| left.created_at.cmp(&right.created_at))
+            .score(&right.skill_id, due_scores)
+            .total_cmp(&engine.score(&left.skill_id, due_scores))
             .then_with(|| left.id.cmp(&right.id))
     });
+    let scores: Vec<f64> = items
+        .iter()
+        .map(|item| engine.score(&item.skill_id, due_scores))
+        .collect();
+    let mut start = 0;
+    while start < items.len() {
+        let mut end = start + 1;
+        while end < items.len() && scores[end].total_cmp(&scores[start]).is_eq() {
+            end += 1;
+        }
+        let len = end - start;
+        if len > 1 {
+            items[start..end].rotate_left(rotation % len);
+        }
+        start = end;
+    }
 }
 
 fn cached_from(bank: &BankItem, phase: Phase) -> CachedItem {
@@ -610,9 +663,15 @@ fn take_for_phase_other_strand(
     taken
 }
 
-fn select_content(template: Template, bank: &[BankItem], engine: SessionEngine) -> Vec<CachedItem> {
+fn select_content(
+    template: Template,
+    bank: &[BankItem],
+    engine: SessionEngine,
+    due_scores: &std::collections::HashMap<String, f64>,
+    rotation: usize,
+) -> Vec<CachedItem> {
     let mut remaining: Vec<&BankItem> = bank.iter().collect();
-    sort_due(&mut remaining, engine);
+    sort_due(&mut remaining, engine, due_scores, rotation);
     let mut out = Vec::new();
     match template {
         Template::SchoolDay20 => {
@@ -840,7 +899,24 @@ pub async fn start(
         phase_index += 1;
     }
     let bank = load_bank(pool).await?;
-    let mut content = select_content(options.template, &bank, options.engine);
+    // The FSRS engine loads due scores once per run, so newly graded
+    // attempts change the very next session's order. Rotation advances
+    // with the run count to avoid replaying the same items.
+    let due_scores = if options.engine.uses_fsrs() {
+        fsrs::due_score_map(pool).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+    let rotation: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_runs")
+        .fetch_one(pool)
+        .await?;
+    let mut content = select_content(
+        options.template,
+        &bank,
+        options.engine,
+        &due_scores,
+        rotation.max(0) as usize,
+    );
     let id = Uuid::new_v4().to_string();
     // The cached rungs mirror items.hints and this run's hint_state row.
     // Creating the row at start fixes the cursor at zero for every session,

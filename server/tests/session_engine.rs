@@ -608,6 +608,92 @@ async fn fsrs_boundary_is_optional_and_orders_items_when_present() {
     cleanup(&db);
 }
 
+async fn schedule(pool: &SqlitePool, skill_id: &str, mastery: f64, due: chrono::DateTime<Utc>) {
+    sqlx::query(
+        "INSERT INTO skill_schedule
+           (skill_id, stability, difficulty, mastery, accuracy, reviews, lapses,
+            last_review, due_at, updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(skill_id)
+    .bind(5.0)
+    .bind(5.0)
+    .bind(mastery)
+    .bind(mastery)
+    .bind(1)
+    .bind(0)
+    .bind(t0().to_rfc3339())
+    .bind(due.to_rfc3339())
+    .bind(t0().to_rfc3339())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn content_ids(pool: &SqlitePool, session_id: &str) -> Vec<String> {
+    let raw: String = sqlx::query_scalar("SELECT content_json FROM session_runs WHERE id = ?")
+        .bind(session_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let content: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+    content
+        .iter()
+        .map(|item| item["id"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn fsrs_engine_prefers_due_low_mastery_skills_and_rotates_items() {
+    let (pool, db) = test_pool("fsrs-planner").await;
+    seed_bank(&pool).await;
+    schedule(
+        &pool,
+        "unit-conversion-scaling",
+        0.1,
+        t0() - ChronoDuration::days(2),
+    )
+    .await;
+    schedule(&pool, "surface-area", 0.9, t0() + ChronoDuration::days(8)).await;
+    schedule(
+        &pool,
+        "volume-prism-cylinder",
+        0.5,
+        t0() - ChronoDuration::hours(2),
+    )
+    .await;
+
+    let mut options = StartOptions::new(Template::SchoolDay20);
+    options.engine = SessionEngine::fsrs();
+    let first = session::start(&pool, options, t0()).await.unwrap();
+    assert_eq!(
+        first.item.as_ref().expect("item").skill_id,
+        "unit-conversion-scaling",
+        "the overdue, low-mastery skill is planned first"
+    );
+
+    // A run is seven items, so a repeated session must move on. Rotation
+    // advances with the run count while due score keeps the weak skill
+    // first.
+    let first_ids = content_ids(&pool, &first.id).await;
+    assert_eq!(first_ids.len(), 7);
+    let mut second_options = StartOptions::new(Template::SchoolDay20);
+    second_options.engine = SessionEngine::fsrs();
+    let second = session::start(&pool, second_options, t0()).await.unwrap();
+    assert_eq!(
+        second.item.as_ref().expect("item").skill_id,
+        "unit-conversion-scaling"
+    );
+    let second_ids = content_ids(&pool, &second.id).await;
+    assert_eq!(second_ids.len(), 7);
+    assert_ne!(
+        first_ids, second_ids,
+        "consecutive sessions must not replay the same item set"
+    );
+
+    cleanup(&db);
+}
+
 #[tokio::test]
 async fn empty_bank_still_starts_a_timed_session() {
     let (pool, db) = test_pool("empty").await;
