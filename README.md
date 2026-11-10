@@ -1,26 +1,53 @@
 # breadstudy
 
-Study companion for Year 10 Maths (Nagle Accelerate / Methods pathway). Deterministic scheduler plus tutor model, not a free-roaming agent.
+Study companion for Year 10 Maths (Nagle Accelerate / Methods pathway). A deterministic planner and mastery model decide what to study; the model generates, grades and teaches inside that plan.
 
-Loop: plan from the vault, run the session, grade the work, write mastery back, save explanations to the vault.
+Live at **https://study.breadway.dev** (Hestia container 7220, Aegis edge).
 
-- Server: Rust axum + SQLite (same pattern as bread-tracker), host port 7220, `study.breadway.dev`
-- Vault source: `~/Projects/school-notes-year-10/Maths` (test map, syllabus checklist, practice sets)
-- Voice: Breeze-TTS-2.cpp on Vulkan (A380), whisper.cpp for explain-back
-- Phone: PWA plus Gotify. No FCM dependency for v1.
+## What it does
 
-See `DESIGN.md` for the full loop and `spec/` for the session state machine.
+- **Plans:** indexes the vault (`~/Projects/school-notes-year-10/Maths`), maps skills to the Test 1-7 course map, and orders practice by FSRS due-ness, mastery and assessment proximity.
+- **Runs sessions:** 20-minute school-day and 40-minute weekend templates with prime, recall, practice, explain, reflect, break and end phases.
+- **Serves items:** 300+ verified practice items across 20 skills, seeded from the vault Practice sets and generated with SymPy verification. Items not served in the last 7 days come first after due order.
+- **Grades:** typed answers, LaTeX and photos, with method marks plus final answer, error tags and written feedback. Graded attempts update FSRS mastery and due dates.
+- **Teaches:** a teaching board where the model writes prose, equations, steps and SVG diagrams, with speech and an interrupt control.
+- **Reviews:** progress page with attempt history, per-skill mastery, recurring error patterns; weekly snapshot endpoint.
+- **Pushes:** Gotify reminders and a soft-friction client for the laptop (no blocking).
 
-## Status
+## Stack
 
-Live at https://study.breadway.dev (container on Hestia, Aegis edge). The vault indexer, item bank with SymPy gate, seed bank, planner, session engine, FSRS mastery, photo grading, Breeze TTS broker, whisper STT, PWA, Gotify reminders, friction client and weekly review are merged.
+- Server: Rust axum + SQLite (litestream replication), container on Hestia.
+- Web: dependency-free PWA in `web/` (KaTeX from CDN for maths).
+- Models: DeepSeek V4.1 Flash through the OpenCode Go API for generation, grading and teaching; local llama.cpp fallbacks for grading.
+- Speech: Kokoro (CPU, default), Gemini TTS when a key is configured, Breeze as an explicit GPU quality fallback, browser speech as the always-works option.
 
-DeepSeek V4.1 Flash grades through the OpenCode Go API (`BREADSTUDY_LLM_*`), with local llama.cpp fallbacks marked degraded. Regenerate the item bank with `breadstudy-seed` after changing the vault.
+## Quick start
+
+```sh
+# on hestia
+cd ~/Projects/breadstudy
+BREADSTUDY_BIND=0.0.0.0:7220 docker compose -p breadstudy \
+  -f packaging/compose.yaml --project-directory=. up -d --build
+curl -s localhost:7220/healthz
+```
+
+Key at `~/.config/breadstudy/opencode-go.key`, mounted read-only into the container. See `packaging/DEPLOY.md` for the full runbook, seeding and item generation.
 
 ## Layout
 
-- `server/` - axum API, planner, item bank, grading, mastery store
+- `server/src` - API, session engine, planner, FSRS, grading, teaching, static serving
 - `migrations/` - SQLite schema
-- `packaging/` - Containerfile, compose, litestream, DEPLOY
-- `spec/` - session state machine, FSRS params, skill map
-- `web/` - PWA session view, model-authored teaching board, dashboard
+- `web/` - PWA: dashboard, session, progress, skill, teach
+- `scripts/` - seed and item generation
+- `spec/` - session rules and skill map
+- `clients/hermes` - soft-friction client
+- `pipelines/`, `services/` - nightly generation and reminders
+- `docs/voice/` - Breeze benchmark on the A380
+
+## Tests
+
+```sh
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+python3 web/tests/check_pwa.py
+```
