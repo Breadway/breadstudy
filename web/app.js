@@ -17,6 +17,7 @@ const ACTIVE_SESSION_KEY = "breadstudy-active-session";
 const SESSION_CACHE_KEY = "breadstudy-session-cache";
 const ATTEMPT_QUEUE_KEY = "breadstudy-attempt-queue";
 const BOARD_CACHE_KEY = "breadstudy-board-blocks";
+const SAVED_EXPLANATIONS_KEY = "breadstudy-saved-explanations";
 
 function readStoredJson(key, fallback) {
   try {
@@ -410,8 +411,10 @@ function sanitizeSvgClient(svg) {
   return root.outerHTML;
 }
 
-function addBlock(block) {
-  const board = document.getElementById("teach-board");
+let boardSections = [];
+
+function addBlock(block, target) {
+  const board = target || document.getElementById("teach-board");
   if (!board) return;
   if (block.kind === "text") {
     const p = document.createElement("p");
@@ -446,11 +449,73 @@ function addBlock(block) {
   }
 }
 
+function setTeachStatus(message) {
+  const status = document.getElementById("teach-status");
+  if (status) status.textContent = message || "";
+}
+
+function saveExplanation(entry) {
+  const saved = readStoredJson(SAVED_EXPLANATIONS_KEY, []);
+  const list = Array.isArray(saved) ? saved : [];
+  list.push(entry);
+  const ok = writeStoredJson(SAVED_EXPLANATIONS_KEY, list.slice(-50));
+  if (ok) {
+    setTeachStatus("Explanation saved on this device. Vault write-back lands later.");
+    logLocal("explanation-saved", { question: entry.question });
+  } else {
+    setTeachStatus("Could not save the explanation on this device: storage is full.");
+  }
+  return ok;
+}
+
+function addBoardSection(question, blocks, meta) {
+  const board = document.getElementById("teach-board");
+  if (!board) return null;
+  const options = meta || {};
+  const section = document.createElement("section");
+  section.className = "board-section";
+  const heading = document.createElement("h3");
+  heading.textContent = question || "Explanation";
+  section.appendChild(heading);
+
+  const body = document.createElement("div");
+  body.className = "board-body";
+  section.appendChild(body);
+  (blocks || []).forEach((block, index) => {
+    if (options.immediate) addBlock(block, body);
+    else setTimeout(() => addBlock(block, body), index * 120);
+  });
+
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "save-explanation";
+  save.textContent = "Save explanation";
+  save.title = "Saves on this device. Vault write-back lands later.";
+  save.addEventListener("click", () => {
+    const ok = saveExplanation({
+      question: question || "Explanation",
+      blocks: blocks || [],
+      item_id: options.item_id || (sessionState.item ? sessionState.item.id : null),
+      at: new Date().toISOString()
+    });
+    if (ok) {
+      save.disabled = true;
+      save.textContent = "Saved on this device";
+    }
+  });
+  section.appendChild(save);
+
+  board.appendChild(section);
+  if (section.scrollIntoView) {
+    try { section.scrollIntoView({ behavior: "smooth", block: "nearest" }); } catch (e) { /* older webview */ }
+  }
+  return section;
+}
+
 async function teach() {
   const input = document.getElementById("teach-input");
   const status = document.getElementById("teach-status");
   const btn = document.getElementById("teach-btn");
-  const board = document.getElementById("teach-board");
   const question = ((input && input.value) || "").trim();
   if (!question) {
     if (status) status.textContent = "Type a question first.";
@@ -469,9 +534,16 @@ async function teach() {
       item_id: activeItem ? activeItem.id : null,
       history: teachHistory
     });
-    if (board) board.innerHTML = "";
-    writeStoredJson(BOARD_CACHE_KEY, { at: new Date().toISOString(), blocks: reply.blocks });
-    reply.blocks.forEach((block, index) => setTimeout(() => addBlock(block), index * 140));
+    const entry = {
+      question,
+      blocks: reply.blocks,
+      at: new Date().toISOString(),
+      item_id: activeItem ? activeItem.id : null
+    };
+    addBoardSection(entry.question, entry.blocks, entry);
+    boardSections.push(entry);
+    boardSections = boardSections.slice(-20);
+    writeStoredJson(BOARD_CACHE_KEY, { at: entry.at, sections: boardSections });
     teachHistory.push({ role: "user", content: worked });
     teachHistory.push({
       role: "assistant",
@@ -1372,12 +1444,25 @@ function updateOnlineStatus() {
 
 function restoreCachedBoard() {
   const cached = readStoredJson(BOARD_CACHE_KEY, null);
-  if (!cached || !Array.isArray(cached.blocks) || cached.blocks.length === 0) return;
-  cached.blocks.forEach((block) => addBlock(block));
-  const status = document.getElementById("teach-status");
-  if (status) {
-    status.textContent = "Showing the board cached at " + new Date(cached.at).toLocaleString() + ".";
+  if (!cached) return;
+  if (Array.isArray(cached.sections) && cached.sections.length > 0) {
+    cached.sections.forEach((section) => {
+      addBoardSection(section.question, section.blocks, {
+        at: section.at,
+        item_id: section.item_id,
+        immediate: true
+      });
+      boardSections.push(section);
+    });
+  } else if (Array.isArray(cached.blocks) && cached.blocks.length > 0) {
+    const section = { question: "Cached explanation", blocks: cached.blocks, at: cached.at };
+    addBoardSection(section.question, section.blocks, { at: cached.at, immediate: true });
+    boardSections.push(section);
+  } else {
+    return;
   }
+  setTeachStatus("Showing the board cached at " + new Date(cached.at).toLocaleString() +
+    ". Saved explanations stay on this device; vault write-back lands later.");
 }
 
 async function flushAttemptQueue() {
