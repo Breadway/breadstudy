@@ -822,6 +822,10 @@ pub struct AttemptRequest {
     /// Set once the student has seen and accepted a low-confidence transcription.
     #[serde(default)]
     pub confirmed: bool,
+    /// The server-driven session this attempt belongs to, when the UI
+    /// submitted it from a running session.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// One marked rubric criterion, stored on the attempt.
@@ -884,6 +888,8 @@ pub enum GradeError {
     Db(#[from] sqlx::Error),
     #[error("grading data error: {0}")]
     Data(#[from] serde_json::Error),
+    #[error("scheduling error: {0}")]
+    Schedule(String),
 }
 
 struct StoredItem {
@@ -1061,6 +1067,28 @@ impl GradingService {
             stated_confidence,
         )
         .await?;
+
+        // Grading and mastery are one event for the student: feed the
+        // marks back through FSRS so skill_schedule, error patterns and
+        // /api/plan/due move with the attempt. The rich attempt row is
+        // already stored above, so record_attempt updates it in place
+        // instead of creating a duplicate.
+        let fsrs_input = crate::fsrs::AttemptInput {
+            item_id: item.id.clone(),
+            input_kind: input_kind.as_str().to_string(),
+            given: attempt.given.clone(),
+            correct: attempt.correct,
+            session_id: request.session_id.clone(),
+            error_tags: attempt
+                .error_tags
+                .iter()
+                .map(|tag| tag.as_str().to_string())
+                .collect(),
+            attempt_id: Some(attempt.id.clone()),
+        };
+        crate::fsrs::record_attempt(pool, &fsrs_input)
+            .await
+            .map_err(|error| GradeError::Schedule(error.to_string()))?;
         Ok(GradeOutcome::Graded { attempt })
     }
 }
