@@ -9,10 +9,13 @@ being silently trusted.
 
 Run inside the image so python3 and sympy are present:
 
-  docker run --rm --entrypoint python3 \
+  docker run --rm --network host --entrypoint python3 \
     -v breadstudy_breadstudy-data:/var/lib/breadstudy \
     -v "$HOME/.config/breadstudy/opencode-go.key:/etc/breadstudy/llm.key:ro" \
-    breadstudy:local /app/generate_items.py --per-skill 4
+    breadstudy:local /app/scripts/generate_items.py --per-skill 4
+
+`--network host` is required: SearXNG binds loopback on the host, and without
+it every item is stored as review_required for lack of a source.
 """
 
 import argparse
