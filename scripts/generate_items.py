@@ -115,6 +115,22 @@ def search_source(query: str) -> tuple:
     )
 
 
+def rubric_for(steps: list, display: str) -> dict:
+    """Method criteria from the model's steps, or an explicit answer-only rubric."""
+    method = [
+        {"id": "m%d" % (n + 1), "description": text, "marks": 1}
+        for n, text in enumerate(steps)
+        if str(text).strip()
+    ]
+    if method:
+        return {"method": method, "final": {"marks": 1, "answer": display}}
+    return {
+        "method": [],
+        "final": {"marks": 1, "answer": display},
+        "answer_only": True,
+    }
+
+
 def normalize(text: str) -> str:
     return "".join(text.lower().split())
 
@@ -196,18 +212,12 @@ def main() -> int:
                 continue
             hints = [str(h) for h in (item.get("hints") or [])][:3]
             steps = [str(s) for s in (item.get("steps") or [])][:3]
-            if len(hints) < 2 or len(steps) < 2:
+            if len(hints) < 2:
                 continue
 
             checkable = verify_answer(expr) is not None
             status = "verified" if (checkable and source_url) else "review_required"
-            rubric = {
-                "method": [
-                    {"id": "m%d" % (n + 1), "description": text, "marks": 1}
-                    for n, text in enumerate(steps)
-                ],
-                "final": {"marks": 1, "answer": display},
-            }
+            rubric = rubric_for(steps, display)
             item_id = str(uuid.uuid4())
             if args.dry_run:
                 print("[%s] %s -> %s" % (status, prompt[:70], display))
