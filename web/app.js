@@ -5,16 +5,61 @@
  */
 const PHASES = ["prime", "recall", "practice", "explain", "reflect", "break", "end"];
 const TEMPLATE_20 = { recall: 2 * 60, practice: 10 * 60, explain: 5 * 60, reflect: 3 * 60 };
+const ACTIVE_SESSION_KEY = "breadstudy-active-session";
 
 let sessionState = {
   phaseIndex: 0,
   remaining: TEMPLATE_20.recall,
   timerId: null,
   hintsUsed: 0,
+  hintsUnlocked: 0,
+  hintTotal: 0,
   item: null,
   sessionId: null,
   serverMode: false
 };
+
+function readStoredSessionId() {
+  try {
+    return localStorage.getItem(ACTIVE_SESSION_KEY) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function urlSessionId() {
+  try {
+    return new URL(window.location.href).searchParams.get("session");
+  } catch (e) {
+    return null;
+  }
+}
+
+function persistSessionId(id) {
+  try {
+    if (id) localStorage.setItem(ACTIVE_SESSION_KEY, id);
+    else localStorage.removeItem(ACTIVE_SESSION_KEY);
+  } catch (e) { /* private mode: the URL still carries the id */ }
+  try {
+    const url = new URL(window.location.href);
+    if (id) url.searchParams.set("session", id);
+    else url.searchParams.delete("session");
+    window.history.replaceState({ session: id || null }, "", url.toString());
+  } catch (e) { /* replaceState can be blocked in an embedded view */ }
+}
+
+function setStartState(active) {
+  const start = document.getElementById("start-btn");
+  if (!start) return;
+  start.disabled = Boolean(active);
+  start.textContent = active ? "Session running" : "Start 20 min";
+  start.setAttribute("aria-disabled", active ? "true" : "false");
+}
+
+function setSessionStatus(message) {
+  const status = document.getElementById("session-status");
+  if (status) status.textContent = message || "";
+}
 
 const SAMPLE_ITEM = {
   id: "sample-volume-cylinder",
@@ -55,24 +100,49 @@ const PHASE_INDEX = { prime: 0, recall: 1, practice: 2, explain: 3, reflect: 4, 
 function applyServerView(view) {
   sessionState.sessionId = view.id;
   sessionState.serverMode = true;
-  sessionState.phaseIndex = PHASE_INDEX[view.phase] !== undefined ? PHASE_INDEX[view.phase] : 0;
+  const index = typeof view.phase_index === "number" ? view.phase_index : PHASE_INDEX[view.phase];
+  sessionState.phaseIndex = index !== undefined ? index : 0;
   sessionState.remaining = view.phase_remaining_seconds || 0;
-  sessionState.hintsUsed = view.hints_used || 0;
+  const previous = sessionState.item;
   if (view.item) {
+    const incoming = view.item.hints || [];
+    const total = Number(view.item.hint_count) || incoming.length;
+    let ladder = incoming.slice();
+    if (previous && previous.id === view.item.id && Array.isArray(previous.hints)) {
+      if (previous.hints.length > ladder.length) ladder = previous.hints.slice();
+      incoming.forEach((hint, idx) => { ladder[idx] = hint; });
+    }
+    const unlocked = Number.isFinite(view.item.hint_unlocked)
+      ? Number(view.item.hint_unlocked)
+      : (Number.isFinite(view.hints_used) ? Number(view.hints_used) : 0);
     sessionState.item = {
       id: view.item.id,
       skill_id: view.item.skill_id,
       strand: view.item.strand,
       prompt: view.item.prompt,
-      hints: view.item.hints || []
+      hints: ladder,
+      hint_count: Math.max(total, ladder.length),
+      hint_unlocked: unlocked
     };
+    sessionState.hintsUnlocked = unlocked;
+    sessionState.hintTotal = Math.max(total, ladder.length);
   } else {
     sessionState.item = null;
+    sessionState.hintsUnlocked = 0;
+    sessionState.hintTotal = 0;
   }
+  sessionState.hintsUsed = sessionState.hintsUnlocked;
+  if (!sessionState.item || !previous || previous.id !== sessionState.item.id) {
+    resetAttemptState();
+  }
+  persistSessionId(view.id);
   renderPhases("phase-row");
   renderTimer();
   renderHints();
   renderItem();
+  const finished = view.phase === "end" || Boolean(view.ended_at);
+  setStartState(!finished);
+  if (finished) persistSessionId(null);
 }
 
 function renderItem() {
@@ -90,6 +160,11 @@ function renderItem() {
 }
 
 async function startSession() {
+  if (sessionState.sessionId) {
+    setSessionStatus("A session is already running. Finish or end it before starting another.");
+    setStartState(true);
+    return;
+  }
   try {
     const view = await postJson("/api/session", { template: "school_day_20" });
     applyServerView(view);
@@ -107,7 +182,35 @@ async function startSession() {
     renderHints();
     renderItem();
     startTimer();
+    setSessionStatus("Working offline with the sample item. Attempts will queue until the server is back.");
     logLocal("session-start", { template: "20min", offline: true });
+  }
+}
+
+async function restoreSession() {
+  const stored = urlSessionId() || readStoredSessionId();
+  if (!stored) return false;
+  try {
+    const res = await fetch("/api/session/" + encodeURIComponent(stored), {
+      headers: { accept: "application/json" }
+    });
+    if (!res.ok) throw new Error("session " + stored + " -> " + res.status);
+    const view = await res.json();
+    applyServerView(view);
+    if (view.phase !== "end" && !view.ended_at) {
+      startTimer();
+      setSessionStatus("Restored the running session.");
+    } else {
+      stopTimer();
+      setSessionStatus("The stored session has finished.");
+    }
+    return true;
+  } catch (e) {
+    persistSessionId(null);
+    setStartState(false);
+    setSessionStatus("The stored session is no longer on the server. Press Start for a fresh one.");
+    logLocal("session-restore-failed", { session: stored, error: String(e) });
+    return false;
   }
 }
 
@@ -259,6 +362,126 @@ function renderGrade(attempt) {
   }
 }
 
+let pendingPhoto = null;
+let lastAnswerText = "";
+
+function setSubmitLabel(label) {
+  const btn = document.getElementById("submit-btn");
+  if (btn) btn.textContent = label;
+}
+
+function photoTargetSize(width, height, maxEdge) {
+  const edge = maxEdge || 1600;
+  const longest = Math.max(width || 0, height || 0);
+  if (!longest) return { width: 0, height: 0 };
+  const scale = Math.min(1, edge / longest);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale))
+  };
+}
+
+function loadPhotoBitmap(file) {
+  if (window.createImageBitmap) {
+    return window.createImageBitmap(file).catch(() => loadPhotoImage(file));
+  }
+  return loadPhotoImage(file);
+}
+
+function loadPhotoImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("could not decode the photo"));
+    };
+    img.src = url;
+  });
+}
+
+function canvasToJpeg(canvas, quality) {
+  return new Promise((resolve) => {
+    if (canvas.toBlob) {
+      canvas.toBlob((blob) => resolve(blob), "image/jpeg", quality);
+      return;
+    }
+    try {
+      const data = canvas.toDataURL("image/jpeg", quality);
+      const raw = atob(data.split(",")[1] || "");
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+      resolve(new Blob([bytes], { type: "image/jpeg" }));
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+// Resize a phone photo to under 1 MB before upload. The long edge starts at
+// 1600px and JPEG quality at 0.8; both step down until the blob fits.
+async function resizePhoto(file, maxBytes) {
+  const limit = maxBytes || 1000000;
+  if (!file || !String(file.type || "").startsWith("image/")) {
+    return { blob: file, mediaType: (file && file.type) || "image/jpeg", resized: false, error: "not an image" };
+  }
+  try {
+    const bitmap = await loadPhotoBitmap(file);
+    let width = bitmap.width || bitmap.naturalWidth;
+    let height = bitmap.height || bitmap.naturalHeight;
+    let size = photoTargetSize(width, height, 1600);
+    let blob = null;
+    for (let scalePass = 0; scalePass < 4; scalePass += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = size.width;
+      canvas.height = size.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("canvas unavailable");
+      ctx.drawImage(bitmap, 0, 0, size.width, size.height);
+      for (let quality = 0.8; quality >= 0.5; quality -= 0.1) {
+        blob = await canvasToJpeg(canvas, quality);
+        if (blob && blob.size <= limit) break;
+      }
+      if (blob && blob.size <= limit) break;
+      size = {
+        width: Math.max(1, Math.round(size.width * 0.75)),
+        height: Math.max(1, Math.round(size.height * 0.75))
+      };
+    }
+    if (!blob) throw new Error("canvas produced no image");
+    return { blob, mediaType: "image/jpeg", resized: true, width: size.width, height: size.height };
+  } catch (e) {
+    return {
+      blob: file,
+      mediaType: file.type || "image/jpeg",
+      resized: false,
+      error: String(e && e.message ? e.message : e)
+    };
+  }
+}
+
+function refreshAnswerPreview() {
+  const latex = document.getElementById("latex-answer");
+  const preview = document.getElementById("latex-preview");
+  if (!latex || !preview) return;
+  const raw = latex.value.trim();
+  if (window.BreadstudyScratch && raw) {
+    window.BreadstudyScratch.previewInto("latex-preview", raw);
+  } else {
+    preview.textContent = raw ? "Typed answer: " + raw : "Typed answer preview appears here.";
+  }
+}
+
+function resetAttemptState() {
+  pendingPhoto = null;
+  lastAnswerText = "";
+  setSubmitLabel("Submit answer");
+}
+
 async function submitAnswer() {
   const status = document.getElementById("grade-feedback");
   const item = sessionState.item;
@@ -272,7 +495,7 @@ async function submitAnswer() {
   const photoInput = document.getElementById("photo-input");
   const file = photoInput && photoInput.files && photoInput.files[0];
 
-  if (!latex && !file) {
+  if (!latex && !file && !pendingPhoto) {
     if (status) status.textContent = "Type an answer or attach a photo first.";
     return;
   }
@@ -283,30 +506,74 @@ async function submitAnswer() {
 
   try {
     let payload;
-    if (file) {
+    if (pendingPhoto) {
       payload = {
         item_id: item.id,
         input_kind: "photo",
-        photo_base64: await fileToBase64(file),
-        photo_media_type: file.type || "image/jpeg"
+        photo_base64: pendingPhoto.base64,
+        photo_media_type: pendingPhoto.mediaType,
+        confirmed: true,
+        confirmed_text: latex || pendingPhoto.transcription
       };
+    } else if (file) {
+      const resized = await resizePhoto(file);
+      const photoStatus = document.getElementById("photo-status");
+      if (resized.resized) {
+        if (photoStatus) {
+          photoStatus.textContent =
+            "Photo resized to " + Math.round(resized.blob.size / 1024) + " KB (" +
+            resized.width + "x" + resized.height + "). The original stays on the device.";
+        }
+      } else if (photoStatus) {
+        photoStatus.textContent = "Could not resize this photo; sending it as-is (" +
+          Math.round(file.size / 1024) + " KB).";
+      }
+      payload = {
+        item_id: item.id,
+        input_kind: "photo",
+        photo_base64: await fileToBase64(resized.blob),
+        photo_media_type: resized.mediaType
+      };
+      lastAnswerText = "";
     } else {
       payload = { item_id: item.id, input_kind: "latex", latex };
+      lastAnswerText = latex;
     }
 
     const reply = await postJson("/api/attempts", payload);
+
     if (reply.status === "needs_confirmation") {
+      const transcription = reply.transcription || "";
+      if (payload.input_kind === "photo" && payload.photo_base64) {
+        pendingPhoto = {
+          base64: payload.photo_base64,
+          mediaType: payload.photo_media_type || "image/jpeg",
+          transcription
+        };
+      }
+      if (latexEl) latexEl.value = transcription;
+      refreshAnswerPreview();
+      setSubmitLabel("Confirm and mark");
       if (status) {
         status.textContent =
-          'I read "' + reply.transcription + '" at ' + Math.round((reply.confidence || 0) * 100) +
-          "% confidence. Fix the answer box if that is wrong, then submit again to confirm.";
+          'I read "' + transcription + '" at ' + Math.round((reply.confidence || 0) * 100) +
+          "% confidence. Fix the transcription in the answer box if needed, then press Confirm and mark.";
       }
+      if (photoInput) photoInput.value = "";
       return;
     }
+
+    pendingPhoto = null;
+    setSubmitLabel("Submit answer");
+    lastAnswerText = (reply.attempt && reply.attempt.given) || latex;
+    if (latexEl && payload.input_kind === "latex") latexEl.value = "";
     renderGrade(reply.attempt);
     logLocal("graded", { item: item.id, correct: reply.attempt.correct });
   } catch (e) {
-    if (status) status.textContent = "Could not mark that: " + e.message;
+    if (status) {
+      status.textContent = "Could not mark that: " + e.message +
+        (pendingPhoto ? " The photo is still attached, so you can retry." : "");
+    }
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -385,24 +652,41 @@ function renderHints() {
   if (!root) return;
   root.innerHTML = "";
   const item = sessionState.item || (sessionState.sessionId ? null : SAMPLE_ITEM);
+  const btn = document.getElementById("hint-btn");
+  const meta = document.getElementById("hint-meta");
   if (!item) {
-    const meta = document.getElementById("hint-meta");
     if (meta) meta.textContent = "Start a session to load the hint ladder.";
-    const btn = document.getElementById("hint-btn");
     if (btn) btn.disabled = true;
     return;
   }
-  item.hints.forEach((hint, idx) => {
+  const ladder = Array.isArray(item.hints) ? item.hints : [];
+  const total = Math.max(Number(item.hint_count) || 0, Number(sessionState.hintTotal) || 0, ladder.length);
+  const unlocked = Math.max(0, Math.min(
+    Number.isFinite(sessionState.hintsUnlocked) ? sessionState.hintsUnlocked : sessionState.hintsUsed,
+    total
+  ));
+  if (total === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "This item has no hint ladder. Ask the tutor on the board instead.";
+    root.appendChild(empty);
+  }
+  for (let idx = 0; idx < total; idx += 1) {
     const div = document.createElement("div");
-    const unlocked = idx < sessionState.hintsUsed;
-    div.className = "hint" + (unlocked ? "" : " locked");
-    div.textContent = unlocked ? "Hint " + (idx + 1) + ": " + hint : "Hint " + (idx + 1) + ": locked";
+    const isUnlocked = idx < unlocked;
+    div.className = "hint" + (isUnlocked ? "" : " locked");
+    if (isUnlocked) {
+      const text = ladder[idx];
+      div.textContent = text
+        ? "Hint " + (idx + 1) + ": " + text
+        : "Hint " + (idx + 1) + ": revealed. Reload the session to fetch its text.";
+    } else {
+      div.textContent = "Hint " + (idx + 1) + " of " + total + ": locked";
+    }
     root.appendChild(div);
-  });
-  const btn = document.getElementById("hint-btn");
-  if (btn) btn.disabled = sessionState.hintsUsed >= item.hints.length;
-  const meta = document.getElementById("hint-meta");
-  if (meta) meta.textContent = "Hints used: " + sessionState.hintsUsed + " of " + item.hints.length;
+  }
+  if (btn) btn.disabled = total === 0 || unlocked >= total;
+  if (meta) meta.textContent = "Hints used: " + unlocked + " of " + total;
 }
 
 async function useHint() {
@@ -412,20 +696,37 @@ async function useHint() {
         "/api/session/" + sessionState.sessionId + "/hint",
         {}
       );
-      sessionState.hintsUsed = outcome.hints_used;
-      if (outcome.session) sessionState.phaseIndex = PHASE_INDEX[outcome.session.phase];
+      if (outcome.session) applyServerView(outcome.session);
+      const unlocked = outcome.session && outcome.session.item && Number.isFinite(outcome.session.item.hint_unlocked)
+        ? Number(outcome.session.item.hint_unlocked)
+        : Number(outcome.hints_used);
+      if (Number.isFinite(unlocked)) {
+        sessionState.hintsUnlocked = unlocked;
+        sessionState.hintsUsed = unlocked;
+      }
+      if (outcome.hint && sessionState.item) {
+        const idx = Math.max(0, (Number(outcome.hints_used) || 1) - 1);
+        if (!sessionState.item.hints) sessionState.item.hints = [];
+        sessionState.item.hints[idx] = outcome.hint;
+        sessionState.item.hint_count = Math.max(
+          Number(sessionState.item.hint_count) || 0,
+          sessionState.item.hints.length
+        );
+      }
       renderHints();
-      logLocal("hint", { session: sessionState.sessionId, count: sessionState.hintsUsed, source: "server" });
+      logLocal("hint", { session: sessionState.sessionId, count: sessionState.hintsUnlocked, source: "server" });
       return;
     } catch (e) {
       logLocal("hint-failed", { error: String(e) });
     }
   }
   const item = sessionState.item || SAMPLE_ITEM;
-  if (sessionState.hintsUsed < item.hints.length) {
-    sessionState.hintsUsed += 1;
+  const total = Math.max(item.hints.length, sessionState.hintTotal || 0);
+  if (sessionState.hintsUnlocked < total) {
+    sessionState.hintsUnlocked += 1;
+    sessionState.hintsUsed = sessionState.hintsUnlocked;
     renderHints();
-    logLocal("hint", { item: item.id, count: sessionState.hintsUsed });
+    logLocal("hint", { item: item.id, count: sessionState.hintsUnlocked });
   }
 }
 
@@ -440,16 +741,7 @@ function logLocal(kind, payload) {
 
 function bindAnswerInputs() {
   const latex = document.getElementById("latex-answer");
-  const preview = document.getElementById("latex-preview");
-  if (latex && preview) {
-    latex.addEventListener("input", () => {
-      const raw = latex.value.trim();
-      preview.textContent = raw ? "LaTeX: " + raw : "Typed answer preview appears here.";
-      if (window.BreadstudyScratch && raw) {
-        window.BreadstudyScratch.previewInto("latex-preview", raw);
-      }
-    });
-  }
+  if (latex) latex.addEventListener("input", refreshAnswerPreview);
   const voiceBtn = document.getElementById("voice-btn");
   const voiceStatus = document.getElementById("voice-status");
   if (voiceBtn) {
@@ -473,9 +765,11 @@ function bindAnswerInputs() {
   const photoStatus = document.getElementById("photo-status");
   if (photo) {
     photo.addEventListener("change", () => {
+      pendingPhoto = null;
+      setSubmitLabel("Submit answer");
       if (photo.files && photo.files.length > 0) {
-        if (photoStatus) photoStatus.textContent = "Photo attached: " + photo.files[0].name;
-        logLocal("photo-input", { name: photo.files[0].name });
+        if (photoStatus) photoStatus.textContent = "Photo attached: " + photo.files[0].name + ". It will be resized before upload.";
+        logLocal("photo-input", { name: photo.files[0].name, bytes: photo.files[0].size });
       }
     });
   }
@@ -582,10 +876,22 @@ document.addEventListener("DOMContentLoaded", () => {
   renderTimer();
   renderHints();
   renderItem();
+  setStartState(false);
   bindSessionControls();
   bindAnswerInputs();
   renderDashboard();
   registerSW();
+  restoreSession();
 });
 
-window.BreadstudySession = { advancePhase, useHint, fetchSkills, SAMPLE_ITEM };
+window.BreadstudySession = {
+  advancePhase,
+  useHint,
+  fetchSkills,
+  SAMPLE_ITEM,
+  restoreSession,
+  persistSessionId,
+  submitAnswer,
+  resizePhoto,
+  photoTargetSize
+};
