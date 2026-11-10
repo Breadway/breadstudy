@@ -16,7 +16,8 @@ let sessionState = {
   hintTotal: 0,
   item: null,
   sessionId: null,
-  serverMode: false
+  serverMode: false,
+  phaseExhausted: false
 };
 
 function readStoredSessionId() {
@@ -101,9 +102,14 @@ function applyServerView(view) {
   sessionState.sessionId = view.id;
   sessionState.serverMode = true;
   const index = typeof view.phase_index === "number" ? view.phase_index : PHASE_INDEX[view.phase];
-  sessionState.phaseIndex = index !== undefined ? index : 0;
+  const nextIndex = index !== undefined ? index : 0;
+  const phaseChanged = nextIndex !== sessionState.phaseIndex;
+  sessionState.phaseIndex = nextIndex;
   sessionState.remaining = view.phase_remaining_seconds || 0;
   const previous = sessionState.item;
+  const sameItem = Boolean(previous && view.item && previous.id === view.item.id);
+  if (phaseChanged) sessionState.phaseExhausted = false;
+  if (!sameItem) sessionState.phaseExhausted = false;
   if (view.item) {
     const incoming = view.item.hints || [];
     const total = Number(view.item.hint_count) || incoming.length;
@@ -141,6 +147,8 @@ function applyServerView(view) {
   renderHints();
   renderItem();
   const finished = view.phase === "end" || Boolean(view.ended_at);
+  const nextQuestion = document.getElementById("next-question-btn");
+  if (nextQuestion) nextQuestion.disabled = finished || !sessionState.item;
   setStartState(!finished);
   if (finished) persistSessionId(null);
 }
@@ -625,8 +633,63 @@ function stopTimer() {
   sessionState.timerId = null;
 }
 
+async function nextQuestion() {
+  if (!sessionState.serverMode || !sessionState.sessionId) {
+    setSessionStatus("Start a session to work through its cached questions.");
+    return;
+  }
+  if (currentPhase() === "end") {
+    setSessionStatus("The session has ended. There is no next question.");
+    return;
+  }
+  const btn = document.getElementById("next-question-btn");
+  if (btn) btn.disabled = true;
+  const before = sessionState.item ? sessionState.item.id : null;
+  try {
+    const view = await postJson("/api/session/" + sessionState.sessionId + "/next-item", {});
+    applyServerView(view);
+    const after = sessionState.item ? sessionState.item.id : null;
+    if (!after || after === before) {
+      sessionState.phaseExhausted = true;
+      sessionState.remaining = view.phase_remaining_seconds || 0;
+      setSessionStatus("No more cached questions in this phase. Use Next phase when you are ready.");
+    } else {
+      sessionState.phaseExhausted = false;
+      setSessionStatus("Loaded the next cached question.");
+    }
+    logLocal("next-item", { phase: currentPhase(), item: after, changed: after !== before });
+  } catch (e) {
+    setSessionStatus("Could not load the next question: " + e.message);
+    logLocal("next-item-failed", { error: String(e) });
+  } finally {
+    const current = document.getElementById("next-question-btn");
+    if (current) current.disabled = currentPhase() === "end" || !sessionState.item;
+  }
+}
+
+const CONTENT_PHASES = new Set(["recall", "practice", "explain"]);
+
 async function advancePhase() {
   if (sessionState.serverMode && sessionState.sessionId) {
+    if (currentPhase() === "end") {
+      setSessionStatus("The session has ended.");
+      return;
+    }
+    if (!sessionState.phaseExhausted && CONTENT_PHASES.has(currentPhase()) && sessionState.item) {
+      const before = sessionState.item.id;
+      try {
+        const view = await postJson("/api/session/" + sessionState.sessionId + "/next-item", {});
+        const after = view.item ? view.item.id : null;
+        if (after && after !== before) {
+          applyServerView(view);
+          setSessionStatus("A cached question was still waiting in this phase. Work it, then press Next phase again.");
+          return;
+        }
+        sessionState.phaseExhausted = true;
+      } catch (e) {
+        logLocal("next-item-failed", { error: String(e) });
+      }
+    }
     try {
       const view = await postJson("/api/session/" + sessionState.sessionId + "/advance", {});
       applyServerView(view);
@@ -780,6 +843,8 @@ function bindSessionControls() {
   if (start) start.addEventListener("click", startSession);
   const next = document.getElementById("next-phase-btn");
   if (next) next.addEventListener("click", advancePhase);
+  const nextQuestionBtn = document.getElementById("next-question-btn");
+  if (nextQuestionBtn) nextQuestionBtn.addEventListener("click", nextQuestion);
   const hintBtn = document.getElementById("hint-btn");
   if (hintBtn) hintBtn.addEventListener("click", useHint);
   const teachBtn = document.getElementById("teach-btn");
@@ -893,5 +958,6 @@ window.BreadstudySession = {
   persistSessionId,
   submitAnswer,
   resizePhoto,
-  photoTargetSize
+  photoTargetSize,
+  nextQuestion
 };
