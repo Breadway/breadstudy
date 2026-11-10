@@ -10,7 +10,7 @@ Live at **https://study.breadway.dev** (Hestia container 7220, Aegis edge).
 - **Runs sessions:** 20-minute school-day and 40-minute weekend templates with prime, recall, practice, explain, reflect, break and end phases.
 - **Serves items:** 300+ verified practice items across 20 skills, seeded from the vault Practice sets and generated with SymPy verification. Items not served in the last 7 days come first after due order.
 - **Grades:** typed answers, LaTeX and photos, with method marks plus final answer, error tags and written feedback. Graded attempts update FSRS mastery and due dates.
-- **Teaches:** a teaching board where the model writes prose, equations, steps and SVG diagrams, with speech and an interrupt control.
+- **Teaches:** a teaching board where the model writes prose, equations, steps, SVG diagrams and frame-by-frame animations, with speech and an interrupt control.
 - **Reviews:** progress page with attempt history, per-skill mastery, recurring error patterns; weekly snapshot endpoint.
 - **Pushes:** Gotify reminders and a soft-friction client for the laptop (no blocking).
 
