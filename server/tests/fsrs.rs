@@ -3,8 +3,8 @@
 //! aggregate per skill, and the weekly review can read the logs.
 
 use breadstudy_server::fsrs::{
-    due_score, due_skills, error_patterns_for_skill, log_session_event, next_hint, record_attempt,
-    weekly_snapshot, AttemptInput, UNSEEN_DUE_SCORE,
+    due_score, due_skills, error_patterns_for_skill, log_session_event, next_hint,
+    next_hint_for_session, record_attempt, weekly_snapshot, AttemptInput, UNSEEN_DUE_SCORE,
 };
 
 fn temp_db(name: &str) -> String {
@@ -228,8 +228,13 @@ async fn hint_use_is_logged_and_lowers_the_mastery_gain() {
     )
     .await;
 
-    next_hint(&pool, "vol-1").await.unwrap();
-    let revealed = next_hint(&pool, "vol-1").await.unwrap().unwrap();
+    next_hint_for_session(&pool, "vol-1", Some("sess-test"))
+        .await
+        .unwrap();
+    let revealed = next_hint_for_session(&pool, "vol-1", Some("sess-test"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(revealed.level, 2);
 
     let hinted = record_attempt(&pool, &attempt("vol-1", true, &[]))
@@ -268,10 +273,12 @@ async fn hint_use_is_logged_and_lowers_the_mastery_gain() {
             .unwrap();
     assert_eq!(stored_hints, 2);
     // The ladder resets so the next rep starts from rung one.
-    let level: i64 = sqlx::query_scalar("SELECT level FROM hint_state WHERE item_id = 'vol-1'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let level: i64 = sqlx::query_scalar(
+        "SELECT level FROM hint_state WHERE session_id = 'sess-test' AND item_id = 'vol-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(level, 0);
     let _ = std::fs::remove_file(&db);
 }
@@ -367,7 +374,9 @@ async fn weekly_review_reads_session_and_intervention_logs() {
     )
     .await
     .unwrap();
-    next_hint(&pool, "vol-1").await.unwrap();
+    next_hint_for_session(&pool, "vol-1", Some("sess-test"))
+        .await
+        .unwrap();
     let outcome = record_attempt(&pool, &attempt("vol-1", false, &["arithmetic-slip"]))
         .await
         .unwrap();

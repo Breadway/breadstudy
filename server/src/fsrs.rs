@@ -387,12 +387,19 @@ pub fn author_ladder(skill_name: &str, answer: &str, worked: &[String]) -> Vec<S
     vec![base, second, third]
 }
 
+/// The `hint_state` key for a session. `None` or an empty id keeps the
+/// legacy item-level cursor used outside a session.
+fn hint_session_key(session_id: Option<&str>) -> &str {
+    session_id.map(str::trim).filter(|id| !id.is_empty()).unwrap_or("")
+}
+
 /// Ensure the item has an authored ladder and return it. Stored ladders
 /// win when they validate; otherwise one is authored from the worked
 /// steps and written back to `items.hints`.
-pub async fn ensure_hint_ladder(
+async fn ensure_hint_ladder_for(
     pool: &sqlx::SqlitePool,
     item_id: &str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<HintLadder> {
     let row: (String, String, String, String, String) = sqlx::query_as(
         "SELECT i.skill_id, i.answer, i.rubric, i.hints, sk.name
@@ -416,10 +423,12 @@ pub async fn ensure_hint_ladder(
             .await?;
         generated
     };
+    let key = hint_session_key(session_id);
     sqlx::query(
-        "INSERT INTO hint_state(item_id, total, updated_at) VALUES(?,?,?)
-         ON CONFLICT(item_id) DO UPDATE SET total = excluded.total, updated_at = excluded.updated_at",
+        "INSERT INTO hint_state(session_id, item_id, total, updated_at) VALUES(?,?,?,?)
+         ON CONFLICT(session_id, item_id) DO UPDATE SET total = excluded.total, updated_at = excluded.updated_at",
     )
+    .bind(key)
     .bind(item_id)
     .bind(levels.len() as i64)
     .bind(iso(Utc::now()))
@@ -432,9 +441,29 @@ pub async fn ensure_hint_ladder(
     })
 }
 
+/// Ensure the item has an authored ladder and return it. Stored ladders
+/// win when they validate; otherwise one is authored from the worked
+/// steps and written back to `items.hints`.
+pub async fn ensure_hint_ladder(
+    pool: &sqlx::SqlitePool,
+    item_id: &str,
+) -> anyhow::Result<HintLadder> {
+    ensure_hint_ladder_for(pool, item_id, None).await
+}
+
 /// Read (and if needed author) the ladder without advancing it.
 pub async fn hint_ladder(pool: &sqlx::SqlitePool, item_id: &str) -> anyhow::Result<HintLadder> {
     ensure_hint_ladder(pool, item_id).await
+}
+
+/// Read (and if needed author) the ladder for one session without
+/// advancing it.
+pub async fn hint_ladder_for_session(
+    pool: &sqlx::SqlitePool,
+    item_id: &str,
+    session_id: &str,
+) -> anyhow::Result<HintLadder> {
+    ensure_hint_ladder_for(pool, item_id, Some(session_id)).await
 }
 
 /// Reveal the next rung of an item's ladder and log the use. Returns
@@ -443,15 +472,28 @@ pub async fn next_hint(
     pool: &sqlx::SqlitePool,
     item_id: &str,
 ) -> anyhow::Result<Option<HintReveal>> {
-    let ladder = ensure_hint_ladder(pool, item_id).await?;
+    next_hint_for_session(pool, item_id, None).await
+}
+
+/// Reveal the next rung for one session run. Each session has its own
+/// cursor, so revealing a hint in one run cannot leak into another.
+pub async fn next_hint_for_session(
+    pool: &sqlx::SqlitePool,
+    item_id: &str,
+    session_id: Option<&str>,
+) -> anyhow::Result<Option<HintReveal>> {
+    let ladder = ensure_hint_ladder_for(pool, item_id, session_id).await?;
     let total = ladder.levels.len() as i64;
+    let key = hint_session_key(session_id);
     let now = Utc::now();
     let mut tx = pool.begin().await?;
-    let current: i64 = sqlx::query_scalar("SELECT level FROM hint_state WHERE item_id = ?")
-        .bind(item_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(0);
+    let current: i64 =
+        sqlx::query_scalar("SELECT level FROM hint_state WHERE session_id = ? AND item_id = ?")
+            .bind(key)
+            .bind(item_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(0);
     if current >= total {
         return Ok(None);
     }
@@ -459,18 +501,19 @@ pub async fn next_hint(
     sqlx::query(
         "UPDATE hint_state
          SET level = ?, uses = uses + 1, last_used_at = ?, updated_at = ?
-         WHERE item_id = ?",
+         WHERE session_id = ? AND item_id = ?",
     )
     .bind(level)
     .bind(iso(now))
     .bind(iso(now))
+    .bind(key)
     .bind(item_id)
     .execute(&mut *tx)
     .await?;
-    let detail = serde_json::json!({"level": level, "total": total});
+    let detail = serde_json::json!({"level": level, "total": total, "session_id": key});
     insert_session_event(
         &mut tx,
-        None,
+        Some(key).filter(|key| !key.is_empty()),
         &iso(now),
         "hint",
         Some(item_id),
@@ -572,11 +615,14 @@ pub async fn record_attempt_at(
         .bind(&input.item_id)
         .fetch_one(&mut *tx)
         .await?;
-    let hints_used: i64 = sqlx::query_scalar("SELECT level FROM hint_state WHERE item_id = ?")
-        .bind(&input.item_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(0);
+    let hint_key = hint_session_key(input.session_id.as_deref());
+    let hints_used: i64 =
+        sqlx::query_scalar("SELECT level FROM hint_state WHERE session_id = ? AND item_id = ?")
+            .bind(hint_key)
+            .bind(&input.item_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(0);
     let hints_used = hints_used.clamp(0, 255) as u8;
     let rating = rating_for(input.correct, hints_used);
     let schedule = load_schedule(&mut tx, &skill_id).await?;
@@ -670,11 +716,15 @@ pub async fn record_attempt_at(
     }
 
     // The ladder resets for the next rep; this attempt keeps its count.
-    sqlx::query("UPDATE hint_state SET level = 0, updated_at = ? WHERE item_id = ?")
-        .bind(iso(now))
-        .bind(&input.item_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE hint_state SET level = 0, updated_at = ?
+         WHERE session_id = ? AND item_id = ?",
+    )
+    .bind(iso(now))
+    .bind(hint_key)
+    .bind(&input.item_id)
+    .execute(&mut *tx)
+    .await?;
 
     let mut repeated_errors = Vec::new();
     if !input.correct {

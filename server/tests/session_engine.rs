@@ -96,7 +96,13 @@ async fn school_day_runs_end_to_end_from_cache() {
     assert!(item.prompt.starts_with("Prompt item-"));
     assert_eq!(item.audio_path.as_deref(), Some("cache/audio/item-00.wav"));
     assert_eq!(item.hint_count, 3);
-    assert!(item.hints.is_empty(), "locked hints must not leak");
+    assert_eq!(
+        item.hints.len(),
+        3,
+        "the full ladder ships even before anything is unlocked"
+    );
+    assert_eq!(item.hint_unlocked, 0);
+    assert_eq!(started.hint_unlocked, 0);
 
     let practice = session::tick(&pool, &started.id, at(120))
         .await
@@ -318,14 +324,17 @@ async fn hints_are_unlocked_from_cache_and_items_can_advance() {
         .as_deref()
         .unwrap_or_default()
         .contains("first hint"));
-    assert_eq!(first.session.item.as_ref().unwrap().hints.len(), 1);
+    assert_eq!(first.session.item.as_ref().unwrap().hints.len(), 3);
+    assert_eq!(first.session.item.as_ref().unwrap().hint_unlocked, 1);
+    assert_eq!(first.session.hint_unlocked, 1);
 
     let second = session::hint(&pool, &started.id, t0())
         .await
         .unwrap()
         .expect("session");
     assert_eq!(second.hints_used, 2);
-    assert_eq!(second.session.item.as_ref().unwrap().hints.len(), 2);
+    assert_eq!(second.session.item.as_ref().unwrap().hints.len(), 3);
+    assert_eq!(second.session.item.as_ref().unwrap().hint_unlocked, 2);
 
     let third = session::hint(&pool, &started.id, t0())
         .await
@@ -334,6 +343,7 @@ async fn hints_are_unlocked_from_cache_and_items_can_advance() {
     assert!(third.hint.is_some());
     assert_eq!(third.hints_used, 3);
     assert_eq!(third.session.item.as_ref().unwrap().hints.len(), 3);
+    assert_eq!(third.session.item.as_ref().unwrap().hint_unlocked, 3);
 
     let fourth = session::hint(&pool, &started.id, t0())
         .await
@@ -358,6 +368,46 @@ async fn hints_are_unlocked_from_cache_and_items_can_advance() {
     let events = session::events(&pool, &started.id).await.unwrap();
     assert!(events.iter().any(|event| event.kind == "hint"));
     assert!(events.iter().any(|event| event.kind == "item"));
+    cleanup(&db);
+}
+
+#[tokio::test]
+async fn hint_progress_is_isolated_between_session_runs() {
+    let (pool, db) = test_pool("hint-isolation").await;
+    seed_bank(&pool).await;
+
+    let first = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    let second = session::start(&pool, StartOptions::new(Template::SchoolDay20), t0())
+        .await
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    assert_eq!(first.item.as_ref().unwrap().id, second.item.as_ref().unwrap().id);
+
+    session::hint(&pool, &first.id, t0()).await.unwrap();
+    session::hint(&pool, &first.id, t0()).await.unwrap();
+
+    let first_view = session::get(&pool, &first.id, t0())
+        .await
+        .unwrap()
+        .expect("first session");
+    assert_eq!(first_view.hint_unlocked, 2);
+    assert_eq!(first_view.hints_used, 2);
+    assert_eq!(first_view.item.as_ref().unwrap().hint_unlocked, 2);
+
+    let second_view = session::get(&pool, &second.id, t0())
+        .await
+        .unwrap()
+        .expect("second session");
+    assert_eq!(
+        second_view.hint_unlocked, 0,
+        "a hint revealed in one run must not unlock another run"
+    );
+    assert_eq!(second_view.hints_used, 0);
+    assert_eq!(second_view.item.as_ref().unwrap().hints.len(), 3);
+    assert_eq!(second_view.item.as_ref().unwrap().hint_unlocked, 0);
+
     cleanup(&db);
 }
 
@@ -483,17 +533,23 @@ async fn graded_session_updates_fsrs_and_hint_state_is_the_only_counter() {
     .unwrap();
     assert_eq!(errors, 2);
 
-    let level: i64 = sqlx::query_scalar("SELECT level FROM hint_state WHERE item_id = ?")
-        .bind(&recall_item)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let level: i64 = sqlx::query_scalar(
+        "SELECT level FROM hint_state WHERE session_id = ? AND item_id = ?",
+    )
+    .bind(&started.id)
+    .bind(&recall_item)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(level, 0);
-    let uses: i64 = sqlx::query_scalar("SELECT uses FROM hint_state WHERE item_id = ?")
-        .bind(&recall_item)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let uses: i64 = sqlx::query_scalar(
+        "SELECT uses FROM hint_state WHERE session_id = ? AND item_id = ?",
+    )
+    .bind(&started.id)
+    .bind(&recall_item)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(uses, 2);
 
     // The duplicate per-run counter is gone; hint_state owns the cursor.
