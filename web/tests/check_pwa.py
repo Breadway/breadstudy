@@ -43,7 +43,8 @@ def main():
     for token in ("install", "activate", "fetch", "caches.open", "skipWaiting"):
         if token not in sw:
             ok = fail("sw.js missing " + token) and False
-    for shell_file in ("index.html", "session.html", "styles.css", "app.js"):
+    for shell_file in ("index.html", "session.html", "styles.css", "app.js",
+                       "teach.html", "teach.js", "teach.css"):
         if shell_file not in sw:
             ok = fail("sw.js shell missing " + shell_file) and False
 
