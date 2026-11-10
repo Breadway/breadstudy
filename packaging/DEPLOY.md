@@ -54,10 +54,12 @@ BREADSTUDY_LLM_API_KEY_FILE=$HOME/.config/breadstudy/opencode-go.key \
 
 Order of preference, all with the same interrupt behaviour:
 
-1. **Kokoro** (default, CPU): `POST /v1/audio/speech` on loopback 7314, served by
-   a small kokoro-onnx sidecar. Measured on hestia: RTF 0.37x on the Ryzen 5
-   5600G, 0.7-0.9s to first audio per sentence. Model files are about 340MB and
-   live outside the repo:
+1. **Kokoro** (default, CPU): runs as the `tts` service on the compose
+   network at `http://tts:7314`. It publishes no host port. A host-only run
+   can use the systemd unit on `127.0.0.1:7314` instead. Measured on hestia:
+   RTF 0.37x on the Ryzen 5 5600G, 0.7-0.9s to first audio per sentence.
+   Model files are about 340MB and live outside the repo at
+   `/var/lib/breadstudy/tts`:
 
    ```sh
    install -d -m 755 /var/lib/breadstudy/tts
@@ -67,11 +69,18 @@ Order of preference, all with the same interrupt behaviour:
      https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
    ```
 
+   Compose mounts that directory read-only at `/models` in the `tts`
+   container. The model files are never baked into the image.
+
 2. **Gemini TTS** when `BREADSTUDY_GEMINI_API_KEY` or
    `BREADSTUDY_GEMINI_API_KEY_FILE` (default `/etc/breadstudy/gemini.key`) is
    set. Model defaults to `gemini-2.5-flash-preview-tts`.
 3. **Breeze** as an explicit quality fallback (see below). Needs the GPU.
 4. **Browser speech** on the client when no server backend is reachable.
+
+`BREADSTUDY_TTS_URL` points at Kokoro. Compose sets it to
+`http://tts:7314`; a host binary defaults to `http://127.0.0.1:7314`. The
+legacy `BREADSTUDY_KOKORO_TTS_URL` is still read as a fallback.
 
 ## breeze-server TTS broker (STUDY-10)
 
@@ -101,7 +110,7 @@ Port registry note: propose these PORTS.md rows in the infra repo
 
 `| 7312 | 127.0.0.1 | breadstudy-tts-prod | ai-inference | breeze-server TTS broker, loopback only |`
 `| 7313 | 127.0.0.1 | breadstudy-tts-upstream-prod | ai-inference | upstream Breeze TTS server, loopback only |`
-`| 7314 | 127.0.0.1 | breadstudy-kokoro-tts | ai-inference | Kokoro ONNX TTS sidecar, loopback only |`
+`| 7314 | compose | breadstudy-kokoro-tts | ai-inference | Kokoro ONNX TTS service, compose network only, no host port |`
 
 Known conflicts 2026-11-09: the first-choice ports 7310 and 7311 are held by
 long-running embedding services (llama-server MiniLM on 7310, embed-shim on
@@ -120,49 +129,56 @@ rather than a stream, so per-sentence requests are the latency strategy. The
 same sentence pipeline and barge-in path are used for Kokoro, Gemini, Breeze
 and browser speech.
 
-### Kokoro sidecar (default, local CPU)
+### Kokoro in compose (default)
 
-The sidecar is `packaging/tts/kokoro_server.py` and binds loopback only.
-Port 7314 is the default because 7310 and 7311 are occupied. Check before
-enabling it:
+The `tts` service is built from `packaging/tts/Containerfile` and runs
+`scripts/kokoro_server.py` on `0.0.0.0:7314` inside the compose network. It
+publishes no host port and mounts `/var/lib/breadstudy/tts` read-only at
+`/models`.
+
+```sh
+docker compose -f packaging/compose.yaml --project-directory . up -d --build
+docker compose -f packaging/compose.yaml ps tts
+curl -s -D - -o /tmp/tts-check.wav \
+  -X POST http://127.0.0.1:7220/api/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"Area equals pi r squared.","voice":"bm_george","speed":1.0}'
+file /tmp/tts-check.wav
+```
+
+The response must include `X-Breadstudy-TTS-Backend: kokoro`. The app reaches
+the service through `BREADSTUDY_TTS_URL`, which compose sets to
+`http://tts:7314`. A host binary keeps the default `http://127.0.0.1:7314`.
+
+The service lazy-loads the model on the first request and keeps it warm. It
+serializes synthesis, caps input at 1200 characters, and by default refuses a
+non-loopback bind. The container sets `KOKORO_ALLOW_NETWORK=1` to listen on
+`0.0.0.0` only on the private compose network, and `KOKORO_PRELOAD=1` to load
+the model in the background after it binds, so a request after startup does
+not pay the full load cost. The host unit stays lazy.
+
+If the `tts` service is absent, the app still starts. `/api/tts` reports
+Kokoro unavailable, tries Gemini when configured, then Breeze, then tells the
+page to use browser speech.
+
+### Kokoro host-only unit
+
+Use the systemd unit only when the server itself runs on the host, outside
+compose. It binds loopback and is not reachable from a container:
 
 ```sh
 ss -ltn 'sport = :7314'
-```
-
-Download the two model files with the commands above, then install the
-Python dependency in a venv:
-
-```sh
 python3 -m venv ~/.local/share/breadstudy/kokoro-venv
 ~/.local/share/breadstudy/kokoro-venv/bin/pip install -r packaging/tts/requirements.txt
-```
-
-Install and start the user unit:
-
-```sh
 cp packaging/tts/breadstudy-kokoro-tts.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now breadstudy-kokoro-tts
 curl -s http://127.0.0.1:7314/healthz
-curl -s -o /tmp/kokoro-check.wav -w '%{http_code} %{time_starttransfer}\n' \
-  -X POST http://127.0.0.1:7314/v1/audio/speech \
-  -H 'Content-Type: application/json' \
-  -d '{"input":"Area equals pi r squared.","voice":"bm_george","speed":1.0}'
 ```
 
-The service lazy-loads the model on the first request and keeps it warm. It
-serializes synthesis, caps input at 1200 characters, and refuses a
-non-loopback bind address.
-
-Container note: compose sets `BREADSTUDY_KOKORO_TTS_URL` to
-`http://host.docker.internal:7314` because the sidecar runs on the host. A
-host binary uses the default `http://127.0.0.1:7314`. The sidecar binds
-loopback only, so a plain Docker bridge container cannot reach it through
-`host.docker.internal` unless you deliberately run a forwarder on the Docker
-gateway. If you keep the sidecars loopback-only, run the breadstudy server as
-a host binary for teaching mode, or accept that the page falls back to browser
-speech. The same caveat applies to the Breeze broker on 7312.
+Do not point the compose server at `127.0.0.1` or `host.docker.internal` for
+Kokoro. This host blocks container-to-host traffic, so that path silently
+falls back to browser speech. Use the `tts` service instead.
 
 ### Gemini quality fallback
 
@@ -204,6 +220,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now breeze-server
 curl -s http://127.0.0.1:7312/healthz
 ```
+
+Compose note: Breeze remains a host-only fallback. The app container cannot
+reach the host loopback broker on 7312, and compose leaves
+`BREADSTUDY_BREEZE_TTS_URL` unset. If you want Breeze from compose, add a
+broker service to the same network and point the app at its service name.
+Otherwise the route reports Breeze unavailable and the page uses browser
+speech.
 
 The Breeze request uses the "patient coach" voice design: a calm,
 encouraging male mentor with an Australian accent, speaking slowly and

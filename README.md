@@ -19,7 +19,7 @@ Live at **https://study.breadway.dev** (Hestia container 7220, Aegis edge).
 - Server: Rust axum + SQLite (litestream replication), container on Hestia.
 - Web: dependency-free PWA in `web/` (KaTeX from CDN for maths).
 - Models: DeepSeek V4.1 Flash through the OpenCode Go API for generation, grading and teaching; local llama.cpp fallbacks for grading.
-- Speech: Kokoro (CPU, default), Gemini TTS when a key is configured, Breeze as an explicit GPU quality fallback, browser speech as the always-works option.
+- Speech: Kokoro as the `tts` service on the compose network (no host port), Gemini TTS when a key is configured, Breeze as an explicit host-only GPU quality fallback, browser speech as the always-works option. Host-only runs can use the loopback systemd unit instead of the compose service.
 
 ## Quick start
 

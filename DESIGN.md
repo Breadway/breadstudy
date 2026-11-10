@@ -25,9 +25,9 @@ Year 10 Maths study needs a loop that decides what to do, runs a timed session, 
 
 Backend order, all with identical barge-in behaviour:
 
-1. **Kokoro** (default): 82M ONNX model on CPU, measured RTF 0.37x on the Ryzen 5 5600G, about 0.7-0.9s to first audio per sentence. No GPU, so it does not contend with the llama router. Voices include `bm_george` (patient British male), `af_heart`, `bf_alice`.
+1. **Kokoro** (default): 82M ONNX model on CPU, measured RTF 0.37x on the Ryzen 5 5600G, about 0.7-0.9s to first audio per sentence. No GPU, so it does not contend with the llama router. Voices include `bm_george` (patient British male), `af_heart`, `bf_alice`. In compose it runs as the `tts` service on `http://tts:7314` with no host port and `/var/lib/breadstudy/tts` mounted read-only; a host-only run can use the loopback systemd unit instead.
 2. **Gemini TTS** when `BREADSTUDY_GEMINI_API_KEY` or its key file is set. Quality option, sentence-chunked because the API returns whole clips.
-3. **Breeze** (explicit quality fallback): 3B model, q4_k on the A380, RTF 0.62x, about 1.3s to first audio. Requires the GPU and does not unload the llama router automatically.
+3. **Breeze** (explicit quality fallback): 3B model, q4_k on the A380, RTF 0.62x, about 1.3s to first audio. Requires the GPU and does not unload the llama router automatically. Host-only: the compose app cannot reach the host loopback broker unless Breeze is added as a compose service.
 4. **Browser speech**: zero-install fallback, always available.
 
 Latency strategy: synthesize sentence 1 as soon as the first text arrives, prefetch the next while the current plays, pre-warm the model when the page opens. Math normalizer converts LaTeX to speakable text; never reads raw TeX.
@@ -44,7 +44,7 @@ T-10 Gotify ping, workspace switch, hide distractions, DND and a session timer. 
 
 ## Deployment
 
-Container on Hestia behind Hestia Caddy (LAN) and Aegis (public). Ports: 7220 web, 7290 container, TTS sidecar 7314, Breeze broker 7312/7313. SQLite replicated continuously with litestream to `/mnt/backups/breadstudy`.
+Container on Hestia behind Hestia Caddy (LAN) and Aegis (public). Ports: 7220 web, 7290 container. The Kokoro TTS service lives on the compose network at `tts:7314` with no host port; host-only runs use loopback 7314. Breeze broker 7312 and upstream 7313 are host-only. SQLite replicated continuously with litestream to `/mnt/backups/breadstudy`.
 
 ## Status
 

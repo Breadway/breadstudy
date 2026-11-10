@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Loopback-only Kokoro TTS sidecar for the breadstudy teaching mode.
+"""Kokoro TTS sidecar for the breadstudy teaching mode.
+
+It is loopback-only by default, which is what the host systemd unit uses. The
+compose image sets KOKORO_ALLOW_NETWORK=1 and listens on 0.0.0.0:7314 only on
+the private compose network; no host port is published.
 
 The public endpoint is intentionally small and OpenAI-compatible:
 
     POST /v1/audio/speech
     {"model":"kokoro","input":"...","voice":"bm_george","speed":1.0}
 
-It returns audio/wav. The model is loaded lazily on the first request and kept
-warm. Model weights are not in the repository; point KOKORO_MODEL and
-KOKORO_VOICES at the downloaded files.
+It returns audio/wav. The model is loaded lazily on the first request by
+default and kept warm. Set KOKORO_PRELOAD=1 to load it in the background at
+startup instead; the compose service does this. Model weights are not in the
+repository; point KOKORO_MODEL and KOKORO_VOICES at the downloaded files.
 
-Only Python's standard library is used for HTTP and WAV encoding. The two
-runtime dependencies are kokoro-onnx and numpy.
+Only Python's standard library is used for HTTP and WAV encoding. The runtime
+dependencies are kokoro-onnx and numpy.
 """
 
 from __future__ import annotations
@@ -232,14 +237,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(wav)
 
 
+def _preload(engine: KokoroEngine) -> None:
+    try:
+        engine._ensure_loaded()
+    except Exception:  # noqa: BLE001 - preload must not kill the server
+        LOG.exception("Kokoro preload failed")
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.environ.get("KOKORO_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(message)s",
     )
     host = _env("KOKORO_HOST", DEFAULT_HOST)
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        LOG.error("refusing to bind non-loopback host %s", host)
+    allow_network = _env("KOKORO_ALLOW_NETWORK", "").lower() in ("1", "true", "yes")
+    loopback = host in ("127.0.0.1", "localhost", "::1")
+    if not loopback and not (allow_network and host == "0.0.0.0"):
+        LOG.error(
+            "refusing to bind %s; set KOKORO_ALLOW_NETWORK=1 for the private "
+            "compose network or use a loopback host",
+            host,
+        )
         return 2
     port = _port()
     model = _env("KOKORO_MODEL", DEFAULT_MODEL)
@@ -248,6 +266,10 @@ def main() -> int:
     Handler.engine = engine
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
+    if _env("KOKORO_PRELOAD", "").lower() in ("1", "true", "yes"):
+        threading.Thread(
+            target=_preload, args=(engine,), name="kokoro-preload", daemon=True
+        ).start()
     LOG.info("breadstudy Kokoro TTS listening on http://%s:%d", host, port)
     try:
         server.serve_forever()
