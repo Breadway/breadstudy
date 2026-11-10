@@ -13,53 +13,61 @@
 </head>
 <body>
 <header class="topbar">
-<div class="brand">breadstudy</div>
+<div class="topbar-row">
+<a class="brand" href="./index.html" aria-label="breadstudy dashboard">
+<span class="brand-mark" aria-hidden="true">b</span>
+<span class="brand-text">breadstudy</span>
+</a>
 <nav class="tabs" aria-label="Primary">
 <a href="./index.html" aria-current="page">Dashboard</a>
 <a href="./session.html">Session</a>
 <a href="./progress.html">Progress</a>
+<a href="./teach.html">Teach</a>
 </nav>
+</div>
 </header>
 <div id="offline-banner" class="offline-banner" role="status" hidden></div>
 <main>
-<section class="card" aria-labelledby="today-h">
-<h2 id="today-h">Today</h2>
-<p id="dash-today" class="muted">Today: a 20 minute school-day session. Start to pull a due skill from the planner.</p>
-<p id="dash-skills" class="muted">Loading skills.</p>
-<ul class="clean skill-list" id="dash-skill-list" aria-label="Skills"></ul>
-<div class="input-row">
-<a class="btn primary" id="start-session-link" href="./session.html" style="text-decoration:none;text-align:center">Start session</a>
+<section class="card today" aria-labelledby="today-h">
+<p class="eyebrow" id="dash-date">Today</p>
+<h1 id="today-h">Study</h1>
+<p id="dash-today" class="muted">Checking what the planner has for you.</p>
+<a class="btn primary wide" id="start-session-link" href="./session.html">Start 20 min</a>
+</section>
+<div class="rows">
+<section class="card rowcard" aria-labelledby="progress-h">
+<h2 id="progress-h">Progress</h2>
+<div class="stat-row">
+<span class="stat" id="dash-streak">0 days</span>
+<span id="dash-recent" class="muted small">No sessions yet</span>
 </div>
+<ul class="clean small" id="dash-history">
+<li class="muted">No sessions recorded on this device yet.</li>
+</ul>
 </section>
-<div class="grid-two">
-<section class="card" aria-labelledby="streak-h">
-<h2 id="streak-h">Streak</h2>
-<div class="streak" id="dash-streak">0 days</div>
-<p class="muted">From session starts recorded on this device.</p>
-</section>
-<section class="card" aria-labelledby="weak-h">
+
+<section class="card rowcard" aria-labelledby="weak-h">
 <h2 id="weak-h">Weak spots</h2>
-<ul class="clean" id="dash-weak">
-<li class="muted">Checking mastery data...</li>
+<ul class="clean dash-weaks" id="dash-weak">
+<li class="muted">Checking mastery data.</li>
 </ul>
 </section>
-</div>
-<div class="grid-two">
-<section class="card" aria-labelledby="assess-h">
+
+<section class="card rowcard" aria-labelledby="skills-h">
+<h2 id="skills-h">Skills</h2>
+<p id="dash-skills" class="muted small">Loading skills.</p>
+<ul class="clean skill-list compact" id="dash-skill-list" aria-label="Skills"></ul>
+</section>
+
+<section class="card rowcard" aria-labelledby="assess-h">
 <h2 id="assess-h">Upcoming assessments</h2>
-<ul class="clean" id="dash-assess">
+<ul class="clean small" id="dash-assess">
 <li class="muted">No assessment dates are set yet.</li>
-</ul>
-</section>
-<section class="card" aria-labelledby="hist-h">
-<h2 id="hist-h">History</h2>
-<ul class="clean" id="dash-history">
-<li class="muted">Session log lives in local storage until the server log ships.</li>
 </ul>
 </section>
 </div>
 </main>
-<footer>Session content is cached on this device for offline review. Answers taken offline are queued and sent when you reconnect.</footer>
+<footer>Session content is cached on this device. Answers taken offline are queued and sent when you reconnect.</footer>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script defer src="./scratchpad.js"></script>
 <script defer src="./app.js"></script>

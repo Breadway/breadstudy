@@ -36,7 +36,7 @@ function renderDetail(detail) {
   const name = document.getElementById("skill-name");
   if (name) name.textContent = detail.name;
   const strand = document.getElementById("skill-strand");
-  if (strand) strand.textContent = detail.strand;
+  if (strand) strand.textContent = detail.strand || "Skill";
   const vault = document.getElementById("skill-vault");
   if (vault) {
     vault.innerHTML = "";
@@ -46,6 +46,16 @@ function renderDetail(detail) {
   }
   const summary = document.getElementById("skill-summary");
   if (summary) summary.textContent = detail.summary;
+  const countLine = document.getElementById("questions-count");
+  if (countLine) {
+    const n = Number(detail.item_count) || 0;
+    countLine.textContent = n + " verified question" + (n === 1 ? "" : "s");
+  }
+  const notesCount = document.getElementById("notes-count");
+  if (notesCount) {
+    const n = Array.isArray(detail.note_excerpts) ? detail.note_excerpts.length : 0;
+    notesCount.textContent = n ? n + " excerpt" + (n === 1 ? "" : "s") : "empty";
+  }
 
   const notes = document.getElementById("skill-notes");
   if (notes) {

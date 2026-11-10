@@ -22,7 +22,7 @@ function previewInto(targetId, latex) {
   if (!target) return;
   const html = renderLatexToHtml(latex);
   if (html) {
-    target.innerHTML = '<span class="katex">' + html + "</span>";
+    target.innerHTML = html;
   } else {
     const span = document.createElement("span");
     span.className = "katex-fallback";

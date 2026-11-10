@@ -12,35 +12,41 @@
 </head>
 <body>
 <header class="topbar">
-<div class="brand">breadstudy progress</div>
+<div class="topbar-row">
+<a class="brand" href="./index.html" aria-label="breadstudy dashboard">
+<span class="brand-mark" aria-hidden="true">b</span>
+<span class="brand-text">breadstudy</span>
+</a>
 <nav class="tabs" aria-label="Primary">
 <a href="./index.html">Dashboard</a>
 <a href="./session.html">Session</a>
 <a href="./progress.html" aria-current="page">Progress</a>
+<a href="./teach.html">Teach</a>
 </nav>
+</div>
 </header>
 <div id="offline-banner" class="offline-banner" role="status" hidden></div>
 <main>
+<section class="card" aria-labelledby="mastery-h">
+<h2 id="mastery-h">Skill mastery</h2>
+<ul class="clean" id="mastery-list">
+<li class="muted">Loading mastery.</li>
+</ul>
+</section>
+
 <section class="card" aria-labelledby="pattern-h">
 <h2 id="pattern-h">Recurring error pattern</h2>
 <p id="top-pattern" class="muted">Loading attempt history.</p>
 </section>
 
-<section class="card" aria-labelledby="attempts-h">
-<h2 id="attempts-h">Recent attempts</h2>
-<p id="attempt-summary" class="muted">Loading attempts.</p>
-<ul class="clean attempt-list" id="attempt-list">
+<details class="fold" id="attempts-details">
+<summary><span>Attempts</span><span class="fold-meta" id="attempt-summary">Loading attempts.</span></summary>
+<div class="fold-body">
+<ul class="clean" id="attempt-list">
 <li class="muted">Loading attempts.</li>
 </ul>
-</section>
-
-<section class="card" aria-labelledby="mastery-h">
-<h2 id="mastery-h">Skill mastery and next due</h2>
-<p class="muted">Mastery comes from the server scheduler. Due dates are when the next review is scheduled.</p>
-<ul class="clean mastery-list" id="mastery-list">
-<li class="muted">Loading mastery.</li>
-</ul>
-</section>
+</div>
+</details>
 </main>
 <footer>Read straight from the server: attempts, scheduler and error patterns. Nothing here is a device-local sample.</footer>
 <script defer src="./progress.js"></script>
