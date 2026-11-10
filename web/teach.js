@@ -73,7 +73,17 @@
 
   const STRAND_ORDER = ["Number", "Algebra", "Geometry", "Probability", "Statistics"];
 
+  /* Animation blocks: frame dwell times are clamped by the server too, but
+   * the client must survive an old or hand-written payload as well. */
+  const ANIMATION_DEFAULT_MS = 900;
+  const ANIMATION_MIN_MS = 200;
+  const ANIMATION_MAX_MS = 3000;
+  const ANIMATION_MAX_FRAMES = 8;
+
   const $ = (id) => document.getElementById(id);
+
+  /** Block element to animation handle, so reveal can drive the right one. */
+  const animationHandles = new WeakMap();
 
   function readJson(key, fallback) {
     try {
@@ -113,13 +123,160 @@
     audioEl: null,
     audioResolve: null,
     utteranceResolve: null,
-    ttsControllers: new Set()
+    ttsControllers: new Set(),
+    animations: new Set(),
+    speechHooksBound: false
   };
 
   function clampRate(value) {
     const number = Number(value);
     if (!Number.isFinite(number)) return 1;
     return Math.min(2, Math.max(0.5, number));
+  }
+
+  function clampFrameDuration(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return ANIMATION_DEFAULT_MS;
+    return Math.min(ANIMATION_MAX_MS, Math.max(ANIMATION_MIN_MS, Math.round(number)));
+  }
+
+  /** Normalise an animation block into at most 8 playable frames. */
+  function animationFrames(block) {
+    const raw = block && Array.isArray(block.frames) ? block.frames : [];
+    return raw
+      .map((frame) => ({
+        svg: String((frame && frame.svg) || ""),
+        caption: String((frame && frame.caption) || "").trim(),
+        duration: clampFrameDuration(frame && frame.duration_ms)
+      }))
+      .filter((frame) => frame.svg)
+      .slice(0, ANIMATION_MAX_FRAMES);
+  }
+
+  function prefersReducedMotion() {
+    try {
+      return typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches === true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /* Pure frame state machine. No timers and no DOM so the widget, the tests
+   * and any future player can drive it by handing it elapsed milliseconds.
+   * `loop` keeps motion going while a block is being spoken; without it the
+   * sequence stops on the final frame. */
+  function createFramePlayer(frames, options) {
+    const opts = options || {};
+    const list = frames.length
+      ? frames
+      : [{ svg: "", caption: "", duration: ANIMATION_DEFAULT_MS }];
+    let index = opts.reducedMotion ? list.length - 1 : 0;
+    let remaining = list[index].duration;
+    let playing = false;
+    let finished = false;
+    const listeners = new Set();
+    const notify = () => listeners.forEach((listener) => listener(api));
+
+    const clampIndex = (value) => Math.min(list.length - 1, Math.max(0, value));
+
+    const api = {
+      get length() { return list.length; },
+      get index() { return index; },
+      get playing() { return playing; },
+      get finished() { return finished; },
+      get current() { return list[index]; },
+      get remainingMs() { return remaining; },
+      onFrame(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      play() {
+        if (list.length < 2 || playing) return;
+        finished = false;
+        if (remaining <= 0) remaining = list[index].duration;
+        playing = true;
+        notify();
+      },
+      pause() {
+        if (!playing) return;
+        playing = false;
+        notify();
+      },
+      /** Consume playback time. Returns true when the visible frame changed. */
+      consume(ms) {
+        if (!playing) return false;
+        let moved = false;
+        let budget = Math.max(0, Number(ms) || 0);
+        while (budget > 0 && playing) {
+          if (budget < remaining) {
+            remaining -= budget;
+            budget = 0;
+            break;
+          }
+          budget -= remaining;
+          moved = true;
+          if (index < list.length - 1) {
+            index += 1;
+            remaining = list[index].duration;
+          } else if (opts.loop) {
+            index = 0;
+            remaining = list[index].duration;
+          } else {
+            remaining = 0;
+            playing = false;
+            finished = true;
+          }
+        }
+        if (moved) notify();
+        return moved;
+      },
+      next() {
+        index = clampIndex(index + 1);
+        remaining = list[index].duration;
+        finished = false;
+        notify();
+      },
+      previous() {
+        index = clampIndex(index - 1);
+        remaining = list[index].duration;
+        finished = false;
+        notify();
+      },
+      seek(value) {
+        index = clampIndex(Math.round(Number(value) || 0));
+        remaining = list[index].duration;
+        finished = false;
+        notify();
+      },
+      replay() {
+        index = 0;
+        remaining = list[0].duration;
+        finished = false;
+        notify();
+      },
+      /** Stop on the last frame without clearing the sequence. */
+      finish() {
+        index = list.length - 1;
+        remaining = list[index].duration;
+        playing = false;
+        finished = true;
+        notify();
+      }
+    };
+    return api;
+  }
+
+  function pauseAnimations() {
+    state.animations.forEach((animation) => animation.pause());
+  }
+
+  function resumeAnimations() {
+    state.animations.forEach((animation) => animation.resume());
+  }
+
+  function stopAnimations() {
+    state.animations.forEach((animation) => animation.stop());
   }
 
   function delay(ms) {
@@ -206,6 +363,12 @@
     };
     if (typeof window.speechSynthesis.addEventListener === "function") {
       window.speechSynthesis.addEventListener("voiceschanged", refresh);
+      if (!state.speechHooksBound) {
+        state.speechHooksBound = true;
+        /* Keep diagrams in step with browser speech. */
+        window.speechSynthesis.addEventListener("pause", pauseAnimations);
+        window.speechSynthesis.addEventListener("resume", resumeAnimations);
+      }
     }
     refresh();
   }
@@ -282,6 +445,7 @@
   }
 
   function cancelAudio() {
+    stopAnimations();
     for (const controller of state.ttsControllers) {
       try { controller.abort(); } catch (error) { /* already finished */ }
     }
@@ -385,6 +549,10 @@
         cleanup();
         reject(new Error("the browser could not play the speech clip"));
       };
+      /* Audio pause happens when speech buffers or is interrupted; the frame
+       * player follows the same pause/resume so motion and voice stay synced. */
+      audio.addEventListener("pause", pauseAnimations);
+      audio.addEventListener("playing", resumeAnimations);
       if (token !== state.revealToken) {
         cleanup();
         resolve();
@@ -594,6 +762,25 @@
       }
       return [labels.length ? `Here is a diagram. Labels: ${labels.join(", ")}.` : "Here is a diagram for this idea."];
     }
+    if (block.kind === "animation") {
+      const frames = animationFrames(block);
+      if (!frames.length) return [];
+      const captions = frames.map((frame) => frame.caption).filter(Boolean);
+      if (captions.length) {
+        return [`Here is the animation: ${captions.join(". ")}.`];
+      }
+      const labels = [];
+      const pattern = /<text[^>]*>([\s\S]*?)<\/text>/gi;
+      frames.forEach((frame) => {
+        let match = pattern.exec(frame.svg);
+        while (match) {
+          const label = match[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          if (label && !labels.includes(label)) labels.push(label);
+          match = pattern.exec(frame.svg);
+        }
+      });
+      return [labels.length ? `Here is an animation. Labels: ${labels.join(", ")}.` : "Here is an animation for this idea."];
+    }
     return [];
   }
 
@@ -627,6 +814,226 @@
     } catch (error) {
       return null;
     }
+  }
+
+  /* Fixed-height frame stage: every frame scales into the same box, so the
+   * board never shifts when the picture changes. Controls stay usable with
+   * mouse, touch and keyboard (native button and range semantics). */
+  function buildAnimationWidget(block, host) {
+    const frames = animationFrames(block);
+    if (!frames.length) return null;
+    const reducedMotion = prefersReducedMotion();
+    const player = createFramePlayer(frames, { loop: true, reducedMotion });
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "board-animation";
+    wrapper.setAttribute("role", "group");
+    wrapper.setAttribute("aria-label", "Animated diagram");
+
+    const stage = document.createElement("div");
+    stage.className = "board-animation-stage";
+    const frameNode = document.createElement("div");
+    frameNode.className = "board-svg board-animation-frame";
+    stage.appendChild(frameNode);
+
+    const caption = document.createElement("p");
+    caption.className = "board-animation-caption";
+
+    const controls = document.createElement("div");
+    controls.className = "board-animation-controls";
+
+    const makeButton = (label, text, extraClass) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = text;
+      button.className = `ghost-btn animation-btn${extraClass ? ` ${extraClass}` : ""}`;
+      button.setAttribute("aria-label", label);
+      return button;
+    };
+    const prev = makeButton("Previous frame", "◀ Back");
+    const playPause = makeButton("Pause animation", "Pause", "animation-play");
+    const next = makeButton("Next frame", "Next ▶");
+    const replay = makeButton("Replay animation", "Replay");
+
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.className = "animation-scrub";
+    slider.min = "0";
+    slider.max = String(frames.length - 1);
+    slider.step = "1";
+    slider.value = String(player.index);
+    slider.setAttribute("aria-label", "Animation frame");
+    slider.disabled = frames.length < 2;
+
+    controls.appendChild(prev);
+    controls.appendChild(playPause);
+    controls.appendChild(next);
+    controls.appendChild(replay);
+
+    const controlRow = document.createElement("div");
+    controlRow.className = "board-animation-scrub-row";
+    controlRow.appendChild(slider);
+
+    wrapper.appendChild(stage);
+    wrapper.appendChild(caption);
+    wrapper.appendChild(controls);
+    wrapper.appendChild(controlRow);
+
+    let timer = null;
+    let oneShot = null;
+    let tickedAt = 0;
+    let speechPaused = false;
+    let userPaused = reducedMotion;
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    const clearOneShot = () => {
+      if (oneShot !== null) {
+        clearTimeout(oneShot);
+        oneShot = null;
+      }
+    };
+
+    const schedule = () => {
+      clearTimer();
+      if (!player.playing) return;
+      const wait = Math.max(40, player.remainingMs);
+      tickedAt = Date.now();
+      timer = setTimeout(() => {
+        timer = null;
+        const elapsed = Math.max(40, Date.now() - tickedAt);
+        player.consume(elapsed);
+        schedule();
+      }, wait);
+    };
+
+    const render = () => {
+      const frame = player.current;
+      const clean = sanitizeSvg(frame.svg);
+      if (clean) {
+        frameNode.innerHTML = clean;
+      } else {
+        frameNode.textContent = "This animation frame could not be shown safely.";
+      }
+      const label = frame.caption || `Frame ${player.index + 1} of ${player.length}`;
+      caption.textContent = label;
+      const singleFrame = player.length < 2;
+      slider.value = String(player.index);
+      slider.setAttribute(
+        "aria-valuetext",
+        `${label} (frame ${player.index + 1} of ${player.length})`
+      );
+      playPause.textContent = player.playing ? "Pause" : "Play";
+      playPause.setAttribute("aria-label", player.playing ? "Pause animation" : "Play animation");
+      playPause.setAttribute("aria-pressed", String(player.playing));
+      playPause.disabled = singleFrame;
+      prev.disabled = singleFrame || player.index === 0;
+      next.disabled = singleFrame || player.index === player.length - 1;
+      replay.disabled = singleFrame;
+    };
+
+    player.onFrame(render);
+
+    playPause.addEventListener("click", () => {
+      if (player.playing) {
+        userPaused = true;
+        player.pause();
+        clearTimer();
+      } else {
+        userPaused = false;
+        player.play();
+        schedule();
+      }
+    });
+    prev.addEventListener("click", () => {
+      userPaused = true;
+      clearTimer();
+      player.pause();
+      player.previous();
+    });
+    next.addEventListener("click", () => {
+      userPaused = true;
+      clearTimer();
+      player.pause();
+      player.next();
+    });
+    replay.addEventListener("click", () => {
+      userPaused = false;
+      player.replay();
+      player.play();
+      schedule();
+    });
+    slider.addEventListener("input", () => {
+      userPaused = true;
+      player.seek(slider.value);
+      if (player.playing) schedule();
+    });
+
+    const handle = {
+      player,
+      /** Total dwell for one full pass, so muted mode can show every frame. */
+      get playbackMs() {
+        return frames.reduce((sum, frame) => sum + frame.duration, 0);
+      },
+      begin(options) {
+        const opts = options || {};
+        clearTimer();
+        clearOneShot();
+        speechPaused = false;
+        if (reducedMotion) {
+          render();
+          return;
+        }
+        userPaused = false;
+        player.play();
+        schedule();
+        state.animations.add(handle);
+        if (opts.speaking === false) {
+          const total = frames.reduce((sum, frame) => sum + frame.duration, 0);
+          oneShot = setTimeout(() => {
+            oneShot = null;
+            clearTimer();
+            player.finish();
+          }, total);
+        }
+      },
+      /** Speech or the block ended: hold the final frame when it completed. */
+      settle(completed) {
+        clearTimer();
+        clearOneShot();
+        if (completed) player.finish();
+        else player.pause();
+        speechPaused = false;
+        state.animations.delete(handle);
+      },
+      pause() {
+        if (player.playing) {
+          player.pause();
+          clearTimer();
+          speechPaused = true;
+        }
+      },
+      resume() {
+        if (!speechPaused || userPaused || reducedMotion) return;
+        speechPaused = false;
+        player.play();
+        schedule();
+      },
+      stop() {
+        clearTimer();
+        clearOneShot();
+        player.pause();
+        state.animations.delete(handle);
+      }
+    };
+
+    render();
+    if (host) animationHandles.set(host, handle);
+    return wrapper;
   }
 
   function renderBlock(block) {
@@ -671,6 +1078,16 @@
       } else {
         const note = document.createElement("p");
         note.textContent = "The tutor sent a diagram that could not be shown safely.";
+        wrapper.appendChild(note);
+      }
+    } else if (block.kind === "animation") {
+      wrapper.classList.add("board-block--animation");
+      const animation = buildAnimationWidget(block, wrapper);
+      if (animation) {
+        wrapper.appendChild(animation);
+      } else {
+        const note = document.createElement("p");
+        note.textContent = "The tutor sent an animation that could not be shown safely.";
         wrapper.appendChild(note);
       }
     } else {
@@ -735,8 +1152,21 @@
       if (block.kind === "latex") return block.latex || "";
       if (block.kind === "steps") return (block.items || []).join("; ");
       if (block.kind === "svg") return "[diagram]";
+      if (block.kind === "animation") {
+        const captions = animationFrames(block).map((frame) => frame.caption).filter(Boolean);
+        return captions.length ? `[animation: ${captions.join("; ")}]` : "[animation]";
+      }
       return "";
     }).filter(Boolean).join("\n");
+  }
+
+  async function waitForDwell(ms, token) {
+    const end = Date.now() + Math.max(0, ms);
+    while (Date.now() < end) {
+      if (token !== state.revealToken) return false;
+      await delay(80);
+    }
+    return token === state.revealToken;
   }
 
   async function revealBlocks(section, blocks, token) {
@@ -748,7 +1178,21 @@
       section.body.appendChild(element);
       state.lastSpoken = { block, el: element };
       scrollBoardToEnd();
-      await speakBlock(block, token, { el: element });
+      const animation = animationHandles.get(element);
+      if (animation && state.muted) {
+        /* No speech to follow: run one pass at the frame durations instead of
+         * the short text dwell, so every frame is seen. */
+        animation.begin({ speaking: false });
+        await waitForDwell(animation.playbackMs, token);
+        animation.settle(token === state.revealToken);
+        continue;
+      }
+      if (animation) animation.begin({ speaking: true });
+      try {
+        await speakBlock(block, token, { el: element });
+      } finally {
+        if (animation) animation.settle(token === state.revealToken);
+      }
     }
     if (token === state.revealToken) {
       const trailing = section.body.querySelector(".writing");
@@ -1316,6 +1760,13 @@
     normalizeLatex,
     normalizeSpeechText,
     segmentsForBlock,
+    animationFrames,
+    clampFrameDuration,
+    createFramePlayer,
+    ANIMATION_DEFAULT_MS,
+    ANIMATION_MIN_MS,
+    ANIMATION_MAX_MS,
+    ANIMATION_MAX_FRAMES,
     interrupt,
     repeatLast
   };
