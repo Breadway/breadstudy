@@ -205,6 +205,102 @@ async function teach() {
   }
 }
 
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",")[1] : result);
+    };
+    reader.onerror = () => reject(new Error("could not read the photo"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderGrade(attempt) {
+  const box = document.getElementById("grade-feedback");
+  if (!box) return;
+  box.innerHTML = "";
+  const verdict = document.createElement("p");
+  verdict.className = attempt.correct ? "grade ok" : "grade bad";
+  verdict.textContent = attempt.correct ? "Correct." : "Not quite.";
+  box.appendChild(verdict);
+
+  const marks = document.createElement("p");
+  marks.className = "muted";
+  marks.textContent =
+    "Method " + attempt.method_marks + "/" + attempt.method_marks_total +
+    " - final answer " + attempt.final_marks + "/" + attempt.final_marks_total +
+    (attempt.degraded ? " (graded by a local fallback model, lower confidence)" : "");
+  box.appendChild(marks);
+
+  if (attempt.feedback) {
+    const feedback = document.createElement("p");
+    feedback.textContent = attempt.feedback;
+    box.appendChild(feedback);
+  }
+
+  if (Array.isArray(attempt.error_tags) && attempt.error_tags.length > 0) {
+    const tags = document.createElement("p");
+    tags.className = "muted";
+    tags.textContent = "Tags: " + attempt.error_tags.join(", ");
+    box.appendChild(tags);
+  }
+}
+
+async function submitAnswer() {
+  const status = document.getElementById("grade-feedback");
+  const item = sessionState.item;
+  if (status) status.textContent = "";
+  if (!item) {
+    if (status) status.textContent = "Start a session first so there is an item to mark.";
+    return;
+  }
+  const latexEl = document.getElementById("latex-answer");
+  const latex = ((latexEl && latexEl.value) || "").trim();
+  const photoInput = document.getElementById("photo-input");
+  const file = photoInput && photoInput.files && photoInput.files[0];
+
+  if (!latex && !file) {
+    if (status) status.textContent = "Type an answer or attach a photo first.";
+    return;
+  }
+
+  const btn = document.getElementById("submit-btn");
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = "Marking...";
+
+  try {
+    let payload;
+    if (file) {
+      payload = {
+        item_id: item.id,
+        input_kind: "photo",
+        photo_base64: await fileToBase64(file),
+        photo_media_type: file.type || "image/jpeg"
+      };
+    } else {
+      payload = { item_id: item.id, input_kind: "latex", latex };
+    }
+
+    const reply = await postJson("/api/attempts", payload);
+    if (reply.status === "needs_confirmation") {
+      if (status) {
+        status.textContent =
+          'I read "' + reply.transcription + '" at ' + Math.round((reply.confidence || 0) * 100) +
+          "% confidence. Fix the answer box if that is wrong, then submit again to confirm.";
+      }
+      return;
+    }
+    renderGrade(reply.attempt);
+    logLocal("graded", { item: item.id, correct: reply.attempt.correct });
+  } catch (e) {
+    if (status) status.textContent = "Could not mark that: " + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function currentPhase() {
   return PHASES[sessionState.phaseIndex] || "end";
 }
@@ -383,6 +479,8 @@ function bindSessionControls() {
   if (hintBtn) hintBtn.addEventListener("click", useHint);
   const teachBtn = document.getElementById("teach-btn");
   if (teachBtn) teachBtn.addEventListener("click", teach);
+  const submitBtn = document.getElementById("submit-btn");
+  if (submitBtn) submitBtn.addEventListener("click", submitAnswer);
   const teachInput = document.getElementById("teach-input");
   if (teachInput) {
     teachInput.addEventListener("keydown", (event) => {
